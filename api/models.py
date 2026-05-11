@@ -868,6 +868,38 @@ def _repair_stale_pending(session) -> bool:
         return False
 
 
+def _request_user_profile_name() -> str | None:
+    """Return the authenticated request user's bound profile, if any."""
+    try:
+        from api.auth import get_current_user
+
+        user = get_current_user()
+    except Exception:
+        user = None
+    if not isinstance(user, dict):
+        return None
+    profile = str(user.get("profile_name") or "").strip()
+    return profile or None
+
+
+def _session_visible_to_request_user(session: Session) -> bool:
+    """Check request-scoped access to a session.
+
+    Only enforced when an authenticated multi-user request context is active.
+    Background workers and legacy code paths without request-bound user context
+    are unaffected.
+    """
+    req_profile = _request_user_profile_name()
+    if not req_profile:
+        return True
+    try:
+        from api.profiles import _profiles_match
+
+        return _profiles_match(getattr(session, "profile", None), req_profile)
+    except Exception:
+        return False
+
+
 def get_session(sid, metadata_only=False):
     """Load a session, optionally with metadata only (skipping the messages array).
 
@@ -878,15 +910,21 @@ def get_session(sid, metadata_only=False):
     """
     with LOCK:
         if sid in SESSIONS:
+            if not _session_visible_to_request_user(SESSIONS[sid]):
+                raise KeyError(sid)
             SESSIONS.move_to_end(sid)  # LRU: mark as recently used
             return SESSIONS[sid]
     if metadata_only:
         s = Session.load_metadata_only(sid)
         if s:
+            if not _session_visible_to_request_user(s):
+                raise KeyError(sid)
             return s
     else:
         s = Session.load(sid)
     if s:
+        if not _session_visible_to_request_user(s):
+            raise KeyError(sid)
         with LOCK:
             SESSIONS[sid] = s
             SESSIONS.move_to_end(sid)

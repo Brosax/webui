@@ -1,7 +1,9 @@
 """
-Hermes Web UI -- Optional password authentication.
-Off by default. Enable by setting HERMES_WEBUI_PASSWORD env var
-or configuring a password in the Settings panel.
+Hermes Web UI -- Authentication and authorization helpers.
+
+Supports:
+1. Legacy single-password mode (HERMES_WEBUI_PASSWORD/settings.json hash).
+2. Multi-user mode backed by STATE_DIR/users.db (api.users).
 """
 import hashlib
 import hmac
@@ -11,9 +13,19 @@ import logging
 import os
 import secrets
 import tempfile
+import threading
 import time
 
 from api.config import STATE_DIR, load_settings
+from api.users import (
+    create_auth_session,
+    invalidate_auth_session,
+    is_multi_user_mode,
+    users_count,
+    verify_api_token,
+    verify_auth_session,
+    verify_user_password,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +60,7 @@ def _resolve_session_ttl() -> int:
 PUBLIC_PATHS = frozenset({
     '/login', '/health', '/favicon.ico', '/sw.js',
     '/api/auth/login', '/api/auth/status',
+    '/setup-admin',
     '/manifest.json', '/manifest.webmanifest',
 })
 
@@ -154,6 +167,7 @@ def _save_login_attempts(attempts: dict[str, list[float]]) -> None:
 
 
 _login_attempts = _load_login_attempts()  # ip -> [timestamp, ...]
+_tls = threading.local()
 
 
 def _check_login_rate(ip: str) -> bool:
@@ -221,23 +235,37 @@ def get_password_hash() -> str | None:
 
 
 def is_auth_enabled() -> bool:
-    """True if a password is configured (env var or settings)."""
+    """True if auth is required for non-public routes."""
+    if is_multi_user_mode():
+        return True
     return get_password_hash() is not None
 
 
-def verify_password(plain) -> bool:
-    """Verify a plaintext password against the stored hash."""
+def verify_password(plain, username: str | None = None) -> bool:
+    """Verify password in legacy or multi-user mode."""
+    if is_multi_user_mode():
+        if not username:
+            return False
+        try:
+            return verify_user_password(username, plain) is not None
+        except ValueError:
+            return False
     expected = get_password_hash()
     if not expected:
         return False
     return hmac.compare_digest(_hash_password(plain), expected)
 
 
-def create_session() -> str:
+def create_session(user_id: int | None = None) -> str:
     """Create a new auth session. Returns signed cookie value."""
-    token = secrets.token_hex(32)
-    _sessions[token] = time.time() + _resolve_session_ttl()
-    _save_sessions(_sessions)
+    if is_multi_user_mode():
+        if user_id is None:
+            raise ValueError("user_id is required in multi-user mode")
+        token = create_auth_session(int(user_id), _resolve_session_ttl())
+    else:
+        token = secrets.token_hex(32)
+        _sessions[token] = time.time() + _resolve_session_ttl()
+        _save_sessions(_sessions)
     sig = hmac.new(_signing_key(), token.encode(), hashlib.sha256).hexdigest()[:32]
     return f"{token}.{sig}"
 
@@ -252,15 +280,22 @@ def _prune_expired_sessions():
         _save_sessions(_sessions)
 
 
-def verify_session(cookie_value) -> bool:
-    """Verify a signed session cookie. Returns True if valid and not expired."""
+def verify_session(cookie_value):
+    """Verify a signed session cookie.
+
+    Returns:
+      - user dict in multi-user mode
+      - bool in legacy mode
+    """
     if not cookie_value or '.' not in cookie_value:
         return False
-    _prune_expired_sessions()  # lazy cleanup on every verification attempt
     token, sig = cookie_value.rsplit('.', 1)
     expected_sig = hmac.new(_signing_key(), token.encode(), hashlib.sha256).hexdigest()[:32]
     if not hmac.compare_digest(sig, expected_sig):
         return False
+    if is_multi_user_mode():
+        return verify_auth_session(token)
+    _prune_expired_sessions()  # legacy lazy cleanup
     expiry = _sessions.get(token)
     if not expiry or time.time() > expiry:
         _sessions.pop(token, None)
@@ -272,6 +307,9 @@ def invalidate_session(cookie_value) -> None:
     """Remove a session token."""
     if cookie_value and '.' in cookie_value:
         token = cookie_value.rsplit('.', 1)[0]
+        if is_multi_user_mode():
+            invalidate_auth_session(token)
+            return
         if token in _sessions:
             _sessions.pop(token, None)
             _save_sessions(_sessions)
@@ -291,55 +329,156 @@ def parse_cookie(handler) -> str | None:
     return morsel.value if morsel else None
 
 
-def check_auth(handler, parsed) -> bool:
-    """Check if request is authorized. Returns True if OK.
-    If not authorized, sends 401 (API) or 302 redirect (page) and returns False."""
-    if not is_auth_enabled():
-        return True
-    # Public paths don't require auth
-    if parsed.path in PUBLIC_PATHS or parsed.path.startswith('/static/') or parsed.path.startswith('/session/static/'):
-        return True
-    # Check session cookie
-    cookie_val = parse_cookie(handler)
-    if cookie_val and verify_session(cookie_val):
-        return True
-    # Not authorized
+def get_current_user() -> dict | None:
+    current = getattr(_tls, "current_user", None)
+    return current if isinstance(current, dict) else None
+
+
+def clear_current_user() -> None:
+    _tls.current_user = None
+
+
+def _set_current_user(handler, user: dict | None) -> None:
+    if isinstance(user, dict):
+        handler.current_user = user
+        _tls.current_user = user
+    else:
+        if hasattr(handler, "current_user"):
+            handler.current_user = None
+        _tls.current_user = None
+
+
+def _extract_bearer(handler) -> str | None:
+    header = str(handler.headers.get("Authorization", "")).strip()
+    if not header.lower().startswith("bearer "):
+        return None
+    token = header[7:].strip()
+    return token or None
+
+
+def _auth_error(handler, parsed, message: str = "Authentication required", status: int = 401) -> bool:
     if parsed.path.startswith('/api/'):
-        handler.send_response(401)
+        handler.send_response(status)
         handler.send_header('Content-Type', 'application/json')
         handler.end_headers()
-        handler.wfile.write(b'{"error":"Authentication required"}')
+        payload = json.dumps({"error": message}, ensure_ascii=False).encode("utf-8")
+        handler.wfile.write(payload)
     else:
         handler.send_response(302)
-        # Pass the original path as ?next= so login.js redirects back after auth.
-        # SECURITY/CORRECTNESS: the inner `?` and `&` MUST be percent-encoded
-        # when stuffed into the outer `?next=` parameter, otherwise:
-        #   (a) multi-param query strings get truncated at the first inner `&`
-        #       (e.g. `/api/sessions?limit=50&offset=0` would round-trip as
-        #       just `/api/sessions?limit=50` after the browser parses the
-        #       outer URL — `offset=0` becomes a separate top-level query
-        #       parameter that the login page ignores).
-        #   (b) attacker-controlled paths could inject a second `next=`
-        #       parameter; per RFC 3986 the duplicate behaviour is undefined
-        #       and parsers diverge (Python's parse_qs returns last-match,
-        #       URLSearchParams returns first-match), opening a query-pollution
-        #       footgun even though _safeNextPath() rejects most malicious
-        #       shapes downstream.
-        # Encoding the entire `path?query` blob with quote(safe='/') turns
-        # `?` → `%3F` and `&` → `%26`, so the outer parameter holds exactly
-        # one path-with-query string and `searchParams.get('next')` returns
-        # the full original URL (the browser auto-decodes once).
-        # (Opus pre-release advisor finding for v0.50.258.)
         import urllib.parse as _urlparse
+
         _path_with_query = parsed.path or '/'
         if parsed.query:
             _path_with_query += '?' + parsed.query
-        # safe='/' keeps path separators readable; everything else (including
-        # `?`, `&`, `=`) gets percent-encoded.
         _next = _urlparse.quote(_path_with_query, safe='/')
         handler.send_header('Location', 'login?next=' + _next)
         handler.end_headers()
     return False
+
+
+def _as_authenticated_user(user: dict, *, auth_type: str, scopes=None) -> dict:
+    out = dict(user)
+    out["auth_type"] = auth_type
+    out["is_admin"] = str(user.get("role")) == "admin"
+    out["token_scopes"] = set(scopes or [])
+    return out
+
+
+def user_has_scope(user: dict | None, scope: str) -> bool:
+    if not isinstance(user, dict):
+        return False
+    if user.get("auth_type") != "token":
+        return True
+    scopes = user.get("token_scopes") or set()
+    if not isinstance(scopes, set):
+        scopes = set(scopes)
+    if "admin" in scopes:
+        return True
+    return scope in scopes
+
+
+def check_auth(handler, parsed) -> bool:
+    """Check if request is authorized. Returns True if OK.
+    If not authorized, sends 401 (API) or 302 redirect (page) and returns False."""
+    clear_current_user()
+    if hasattr(handler, "current_user"):
+        handler.current_user = None
+
+    # First-run setup mode: no user DB entries and no legacy password.
+    # Keep legacy bootstrap compatibility when HERMES_WEBUI_PASSWORD/settings
+    # is configured before creating multi-user accounts.
+    setup_mode = (users_count() == 0 and get_password_hash() is None)
+    if setup_mode:
+        setup_public = {
+            "/setup-admin",
+            "/api/setup/admin",
+            "/api/auth/status",
+            "/api/auth/login",
+            "/health",
+            "/favicon.ico",
+            "/sw.js",
+            "/manifest.json",
+            "/manifest.webmanifest",
+        }
+        if parsed.path.startswith("/static/") or parsed.path in setup_public:
+            return True
+        if parsed.path == "/login":
+            handler.send_response(302)
+            handler.send_header("Location", "/setup-admin")
+            handler.end_headers()
+            return False
+        if parsed.path.startswith("/api/"):
+            handler.send_response(403)
+            handler.send_header("Content-Type", "application/json")
+            handler.end_headers()
+            handler.wfile.write(b'{"error":"Admin setup required"}')
+            return False
+        handler.send_response(302)
+        handler.send_header("Location", "/setup-admin")
+        handler.end_headers()
+        return False
+
+    # Public paths don't require auth
+    if parsed.path in PUBLIC_PATHS or parsed.path.startswith('/static/') or parsed.path.startswith('/session/static/'):
+        return True
+
+    # Legacy mode without password: allow all requests.
+    if not is_multi_user_mode() and not is_auth_enabled():
+        return True
+
+    # Multi-user mode: Authorization header token first, then cookie session.
+    if is_multi_user_mode():
+        bearer = _extract_bearer(handler)
+        if bearer:
+            token_ctx = verify_api_token(bearer)
+            if token_ctx:
+                user = token_ctx.get("user") or {}
+                if user.get("status") != "active":
+                    return _auth_error(handler, parsed, "Account is disabled", status=403)
+                _set_current_user(
+                    handler,
+                    _as_authenticated_user(
+                        user,
+                        auth_type="token",
+                        scopes=token_ctx.get("scopes") or set(),
+                    ),
+                )
+                return True
+        cookie_val = parse_cookie(handler)
+        if cookie_val:
+            user = verify_session(cookie_val)
+            if isinstance(user, dict):
+                if user.get("status") != "active":
+                    return _auth_error(handler, parsed, "Account is disabled", status=403)
+                _set_current_user(handler, _as_authenticated_user(user, auth_type="cookie"))
+                return True
+        return _auth_error(handler, parsed)
+
+    # Legacy single-password mode.
+    cookie_val = parse_cookie(handler)
+    if cookie_val and verify_session(cookie_val):
+        return True
+    return _auth_error(handler, parsed)
 
 
 def set_auth_cookie(handler, cookie_value) -> None:

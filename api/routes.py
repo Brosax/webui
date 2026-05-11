@@ -22,6 +22,7 @@ import re
 from pathlib import Path
 from contextlib import closing
 from urllib.parse import parse_qs
+from api.auth import user_has_scope
 from api.agent_sessions import (
     MESSAGING_SOURCES,
     is_cli_session_row,
@@ -78,6 +79,22 @@ _STALE_MESSAGING_END_REASONS = {"session_reset", "session_switch"}
 # Re-exported here so existing `_profiles_match(...)` call sites in this
 # module keep resolving without per-call-site refactors.
 from api.profiles import _profiles_match  # noqa: F401, E402  (re-export)
+from api.users import (
+    create_api_token,
+    create_user,
+    get_shared_skills_dir,
+    is_workspace_allowed_for_user,
+    is_multi_user_mode,
+    list_tokens_for_user,
+    list_users as _list_users,
+    normalize_scopes,
+    revoke_api_token,
+    set_user_password,
+    update_user as _update_user,
+    users_count,
+    validate_username,
+    verify_user_password,
+)
 
 
 def _all_profiles_query_flag(parsed_url) -> bool:
@@ -91,26 +108,55 @@ def _all_profiles_query_flag(parsed_url) -> bool:
     return raw in ('1', 'true', 'yes', 'on')
 
 
-def _active_skills_dir() -> Path:
-    """Return the skills directory for the request's active Hermes profile.
+def _current_user(handler) -> dict | None:
+    user = getattr(handler, "current_user", None)
+    return user if isinstance(user, dict) else None
 
-    WebUI profile switches are cookie/thread-local scoped, so the agent
-    module-level ``tools.skills_tool.SKILLS_DIR`` can still point at the server
-    startup profile. Skills UI endpoints must derive the directory from
-    ``get_active_hermes_home()`` for every request instead of reading that
-    process-global constant.
-    """
+
+def _is_admin(handler) -> bool:
+    user = _current_user(handler)
+    return bool(user and str(user.get("role")) == "admin")
+
+
+def _require_scope(handler, scope: str):
+    user = _current_user(handler)
+    if not user:
+        return None
+    if user_has_scope(user, scope):
+        return None
+    bad(handler, "Insufficient token scope", 403)
+    return True
+
+
+def _require_admin(handler):
+    if _is_admin(handler):
+        return None
+    bad(handler, "Admin permission required", 403)
+    return True
+
+
+def _ensure_session_workspace_allowed(handler, session, *, write: bool = False):
+    user = _current_user(handler)
+    if not user:
+        return None
     try:
-        from api.profiles import get_active_hermes_home
-
-        return Path(get_active_hermes_home()) / "skills"
+        ws = Path(getattr(session, "workspace", "")).resolve()
     except Exception:
-        try:
-            from tools.skills_tool import SKILLS_DIR
+        bad(handler, "Invalid session workspace", 400)
+        return True
+    if is_workspace_allowed_for_user(ws, user, write=write):
+        return None
+    mode = "write" if write else "read"
+    bad(handler, f"Workspace access denied for {mode}", 403)
+    return True
 
-            return Path(SKILLS_DIR)
-        except Exception:
-            return Path(os.getenv("HERMES_HOME", str(Path.home() / ".hermes"))).expanduser() / "skills"
+
+def _active_skills_dir() -> Path:
+    """Return the shared enterprise skills directory."""
+    try:
+        return get_shared_skills_dir()
+    except Exception:
+        return (Path(os.getenv("HERMES_SHARED_SKILLS_DIR", "")).expanduser() if os.getenv("HERMES_SHARED_SKILLS_DIR", "").strip() else (STATE_DIR / "shared_skills")).resolve()
 
 
 def _skill_path_within(base_dir: Path, candidate: Path) -> bool:
@@ -497,6 +543,19 @@ def _normalize_cron_profile_value(value) -> str | None:
     if profile not in _available_cron_profile_names():
         raise ValueError(f"Unknown profile: {profile}")
     return profile
+
+
+def _normalize_cron_profile_for_request(handler, value) -> str | None:
+    if is_multi_user_mode():
+        raw = str(value or "").strip()
+        if not raw:
+            return None
+        user = _current_user(handler)
+        bound = str((user or {}).get("profile_name") or "").strip()
+        if not bound or not _profiles_match(raw, bound):
+            raise PermissionError("Cannot set cron profile outside the current user")
+        return bound
+    return _normalize_cron_profile_value(value)
 
 
 def _profile_home_for_cron_job(job: dict):
@@ -2029,13 +2088,66 @@ button:hover{background:rgba(124,185,255,.25)}
   <h1>{{BOT_NAME}}</h1>
   <p class="sub">{{LOGIN_SUBTITLE}}</p>
   <form id="login-form" data-invalid-pw="{{LOGIN_INVALID_PW}}" data-conn-failed="{{LOGIN_CONN_FAILED}}">
-    <input type="password" id="pw" placeholder="{{LOGIN_PLACEHOLDER}}" autofocus>
+    <input type="text" id="username" placeholder="Username" autocapitalize="off" autocomplete="username" autofocus>
+    <input type="password" id="pw" placeholder="{{LOGIN_PLACEHOLDER}}">
     <button type="submit">{{LOGIN_BTN}}</button>
   </form>
   <div class="err" id="err"></div>
 </div>
 <!-- Keep login.js relative so subpath mounts load it under the current scope. -->
 <script src="static/login.js?v={{WEBUI_VERSION}}"></script>
+</body></html>"""
+
+
+_SETUP_ADMIN_PAGE_HTML = """<!doctype html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Hermes — Setup Admin</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#101522;color:#eef2ff;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;
+  min-height:100vh;display:flex;align-items:center;justify-content:center}
+.card{background:#151d2f;border:1px solid rgba(255,255,255,.1);border-radius:12px;padding:28px;width:360px}
+h1{font-size:18px;margin-bottom:8px}
+p{font-size:12px;color:#a8b3cf;margin-bottom:18px}
+input{width:100%;margin-bottom:10px;padding:10px;border-radius:8px;border:1px solid rgba(255,255,255,.14);background:#0f1727;color:#eef2ff}
+button{width:100%;padding:10px;border-radius:8px;border:1px solid #3559a8;background:#1d3f83;color:#fff;cursor:pointer}
+.err{margin-top:10px;color:#ff8f8f;font-size:12px;display:none}
+</style></head><body>
+<div class="card">
+  <h1>Create Admin Account</h1>
+  <p>First-time setup: create the enterprise administrator.</p>
+  <form id="setup-form">
+    <input id="username" type="text" placeholder="username" autocapitalize="off" autocomplete="username">
+    <input id="display_name" type="text" placeholder="display name (optional)">
+    <input id="password" type="password" placeholder="password" autocomplete="new-password">
+    <button type="submit">Create Admin</button>
+  </form>
+  <div id="err" class="err"></div>
+</div>
+<script>
+(function(){
+  var form=document.getElementById('setup-form');
+  var err=document.getElementById('err');
+  function show(msg){ err.textContent=msg||'Setup failed'; err.style.display='block'; }
+  function hide(){ err.style.display='none'; }
+  form.addEventListener('submit', async function(e){
+    e.preventDefault();
+    hide();
+    var body={
+      username:(document.getElementById('username').value||'').trim(),
+      display_name:(document.getElementById('display_name').value||'').trim(),
+      password:(document.getElementById('password').value||'')
+    };
+    try{
+      var res=await fetch('api/setup/admin',{method:'POST',headers:{'Content-Type':'application/json'},credentials:'include',body:JSON.stringify(body)});
+      var data={};
+      try{ data=await res.json(); }catch(_){}
+      if(res.ok&&data.ok){ window.location.href='./'; return; }
+      show(data.error||'Setup failed');
+    }catch(_){ show('Connection failed'); }
+  });
+})();
+</script>
 </body></html>"""
 
 
@@ -2820,7 +2932,22 @@ def handle_get(handler, parsed) -> bool:
         except Exception as exc:
             return _serve_shell_unavailable(handler, exc)
 
+    if parsed.path == "/setup-admin":
+        from api.auth import get_password_hash
+        if users_count() > 0 or get_password_hash() is not None:
+            handler.send_response(302)
+            handler.send_header("Location", "/login")
+            handler.end_headers()
+            return True
+        return t(handler, _SETUP_ADMIN_PAGE_HTML, content_type="text/html; charset=utf-8")
+
     if parsed.path == "/login":
+        from api.auth import get_password_hash
+        if users_count() == 0 and get_password_hash() is None:
+            handler.send_response(302)
+            handler.send_header("Location", "/setup-admin")
+            handler.end_headers()
+            return True
         _settings = load_settings()
         _bn = _html.escape(_settings.get("bot_name") or "Hermes")
         _lang = _settings.get("language", "en")
@@ -2849,13 +2976,65 @@ def handle_get(handler, parsed) -> bool:
         return t(handler, _page, content_type="text/html; charset=utf-8")
 
     if parsed.path == "/api/auth/status":
-        from api.auth import is_auth_enabled, parse_cookie, verify_session
+        from api.auth import get_password_hash, is_auth_enabled, parse_cookie, verify_session
 
         logged_in = False
+        user_payload = None
+        setup_required = (users_count() == 0 and get_password_hash() is None)
         if is_auth_enabled():
+            current = _current_user(handler)
+            if current:
+                logged_in = True
+                user_payload = {
+                    "id": current.get("id"),
+                    "username": current.get("username"),
+                    "display_name": current.get("display_name"),
+                    "role": current.get("role"),
+                    "status": current.get("status"),
+                    "profile_name": current.get("profile_name"),
+                }
             cv = parse_cookie(handler)
-            logged_in = bool(cv and verify_session(cv))
-        return j(handler, {"auth_enabled": is_auth_enabled(), "logged_in": logged_in})
+            if not logged_in:
+                verified = verify_session(cv) if cv else None
+                logged_in = bool(verified)
+                if isinstance(verified, dict):
+                    user_payload = {
+                        "id": verified.get("id"),
+                        "username": verified.get("username"),
+                        "display_name": verified.get("display_name"),
+                        "role": verified.get("role"),
+                        "status": verified.get("status"),
+                        "profile_name": verified.get("profile_name"),
+                    }
+        return j(
+            handler,
+            {
+                "auth_enabled": is_auth_enabled(),
+                "logged_in": logged_in,
+                "setup_required": setup_required,
+                "user": user_payload,
+            },
+        )
+
+    if parsed.path == "/api/admin/users":
+        scope_err = _require_scope(handler, "admin")
+        if scope_err:
+            return scope_err
+        perm_err = _require_admin(handler)
+        if perm_err:
+            return perm_err
+        users = _list_users()
+        return j(handler, {"users": users, "count": len(users)})
+
+    if parsed.path == "/api/tokens":
+        scope_err = _require_scope(handler, "chat")
+        if scope_err:
+            return scope_err
+        user = _current_user(handler)
+        if not user:
+            return bad(handler, "Token management requires multi-user login", 400)
+        tokens = list_tokens_for_user(int(user["id"]))
+        return j(handler, {"tokens": tokens, "count": len(tokens)})
 
     if parsed.path in ("/manifest.json", "/manifest.webmanifest"):
         static_root = Path(__file__).parent.parent / "static"
@@ -2976,6 +3155,7 @@ def handle_get(handler, parsed) -> bool:
         settings = load_settings()
         # Never expose the stored password hash to clients
         settings.pop("password_hash", None)
+        settings["multi_user_mode"] = is_multi_user_mode()
         # Surface env-var precedence so the UI can disable the password field
         # instead of silently no-oping the save (#1560). The setting takes
         # precedence in api.auth.get_password_hash(), but until now the UI
@@ -3011,6 +3191,9 @@ def handle_get(handler, parsed) -> bool:
         return _serve_static(handler, parsed)
 
     if parsed.path == "/api/session":
+        scope_err = _require_scope(handler, "chat")
+        if scope_err:
+            return scope_err
         import time as _time
         _t0 = _time.monotonic()
         _debug_slow = os.environ.get("HERMES_DEBUG_SLOW", "")
@@ -3268,6 +3451,9 @@ def handle_get(handler, parsed) -> bool:
         return j(handler, audit_session_recovery(SESSION_DIR, state_db_path=_active_state_db_path()))
 
     if parsed.path == "/api/session/status":
+        scope_err = _require_scope(handler, "chat")
+        if scope_err:
+            return scope_err
         sid = parse_qs(parsed.query).get("session_id", [""])[0]
         if not sid:
             return bad(handler, "Missing session_id")
@@ -3279,12 +3465,18 @@ def handle_get(handler, parsed) -> bool:
             return bad(handler, "Session not found", 404)
 
     if parsed.path == "/api/session/yolo":
+        scope_err = _require_scope(handler, "chat")
+        if scope_err:
+            return scope_err
         sid = parse_qs(parsed.query).get("session_id", [""])[0]
         if not sid:
             return bad(handler, "Missing session_id")
         return j(handler, {"yolo_enabled": is_session_yolo_enabled(sid)})
 
     if parsed.path == "/api/session/usage":
+        scope_err = _require_scope(handler, "chat")
+        if scope_err:
+            return scope_err
         sid = parse_qs(parsed.query).get("session_id", [""])[0]
         if not sid:
             return bad(handler, "Missing session_id")
@@ -3295,6 +3487,9 @@ def handle_get(handler, parsed) -> bool:
             return bad(handler, "Session not found", 404)
 
     if parsed.path == "/api/background/status":
+        scope_err = _require_scope(handler, "chat")
+        if scope_err:
+            return scope_err
         sid = parse_qs(parsed.query).get("session_id", [""])[0]
         if not sid:
             return bad(handler, "Missing session_id")
@@ -3302,6 +3497,9 @@ def handle_get(handler, parsed) -> bool:
         return j(handler, {"results": get_results(sid)})
 
     if parsed.path == "/api/sessions":
+        scope_err = _require_scope(handler, "chat")
+        if scope_err:
+            return scope_err
         diag = RequestDiagnostics.maybe_start("GET", parsed.path, logger=logger)
         try:
             diag.stage("all_sessions")
@@ -3359,7 +3557,15 @@ def handle_get(handler, parsed) -> bool:
             diag.stage("active_profile")
             from api.profiles import get_active_profile_name
             active_profile = get_active_profile_name()
-            all_profiles = _all_profiles_query_flag(parsed)
+            requested_all_profiles = _all_profiles_query_flag(parsed)
+            if requested_all_profiles and is_multi_user_mode():
+                scope_err = _require_scope(handler, "admin")
+                if scope_err:
+                    return scope_err
+            if is_multi_user_mode():
+                all_profiles = requested_all_profiles and _is_admin(handler)
+            else:
+                all_profiles = requested_all_profiles
             diag.stage("profile_filter")
             if all_profiles:
                 scoped = merged
@@ -3400,7 +3606,15 @@ def handle_get(handler, parsed) -> bool:
         from api.profiles import get_active_profile_name
         active_profile = get_active_profile_name()
         all_projects = load_projects()
-        all_profiles = _all_profiles_query_flag(parsed)
+        requested_all_profiles = _all_profiles_query_flag(parsed)
+        if requested_all_profiles and is_multi_user_mode():
+            scope_err = _require_scope(handler, "admin")
+            if scope_err:
+                return scope_err
+        if is_multi_user_mode():
+            all_profiles = requested_all_profiles and _is_admin(handler)
+        else:
+            all_profiles = requested_all_profiles
         if all_profiles:
             scoped = all_projects
         else:
@@ -3414,14 +3628,23 @@ def handle_get(handler, parsed) -> bool:
         })
 
     if parsed.path == "/api/session/export":
+        scope_err = _require_scope(handler, "chat")
+        if scope_err:
+            return scope_err
         return _handle_session_export(handler, parsed)
 
     if parsed.path == "/api/workspaces":
+        scope_err = _require_scope(handler, "files")
+        if scope_err:
+            return scope_err
         return j(
             handler, {"workspaces": load_workspaces(), "last": get_last_workspace()}
         )
 
     if parsed.path == "/api/workspaces/suggest":
+        scope_err = _require_scope(handler, "files")
+        if scope_err:
+            return scope_err
         qs = parse_qs(parsed.query)
         prefix = qs.get("prefix", [""])[0]
         return j(
@@ -3433,6 +3656,9 @@ def handle_get(handler, parsed) -> bool:
         )
 
     if parsed.path == "/api/sessions/search":
+        scope_err = _require_scope(handler, "chat")
+        if scope_err:
+            return scope_err
         return _handle_sessions_search(handler, parsed)
 
     if parsed.path == "/api/list":
@@ -3514,10 +3740,16 @@ def handle_get(handler, parsed) -> bool:
         return j(handler, check_for_updates(force=force))
 
     if parsed.path == "/api/chat/stream/status":
+        scope_err = _require_scope(handler, "chat")
+        if scope_err:
+            return scope_err
         stream_id = parse_qs(parsed.query).get("stream_id", [""])[0]
         return j(handler, {"active": stream_id in STREAMS, "stream_id": stream_id})
 
     if parsed.path == "/api/chat/cancel":
+        scope_err = _require_scope(handler, "chat")
+        if scope_err:
+            return scope_err
         stream_id = parse_qs(parsed.query).get("stream_id", [""])[0]
         if not stream_id:
             return bad(handler, "stream_id required")
@@ -3525,6 +3757,9 @@ def handle_get(handler, parsed) -> bool:
         return j(handler, {"ok": True, "cancelled": cancelled, "stream_id": stream_id})
 
     if parsed.path == "/api/chat/stream":
+        scope_err = _require_scope(handler, "chat")
+        if scope_err:
+            return scope_err
         return _handle_sse_stream(handler, parsed)
 
     if parsed.path == "/api/terminal/output":
@@ -3667,19 +3902,31 @@ def handle_get(handler, parsed) -> bool:
     # ── Profile API (GET) ──
     if parsed.path == "/api/profiles":
         from api.profiles import list_profiles_api, get_active_profile_name
-
-        return j(
-            handler,
-            {"profiles": list_profiles_api(), "active": get_active_profile_name()},
-        )
+        profiles = list_profiles_api()
+        active = get_active_profile_name()
+        if is_multi_user_mode():
+            user = _current_user(handler)
+            if user and user.get("profile_name"):
+                bound = str(user.get("profile_name"))
+                profiles = [p for p in profiles if p.get("name") == bound] or [
+                    {
+                        "name": bound,
+                        "path": "",
+                        "is_default": False,
+                        "is_active": True,
+                    }
+                ]
+                active = bound
+        return j(handler, {"profiles": profiles, "active": active})
 
     if parsed.path == "/api/profile/active":
         from api.profiles import get_active_profile_name, get_active_hermes_home
-
-        return j(
-            handler,
-            {"name": get_active_profile_name(), "path": str(get_active_hermes_home())},
-        )
+        name = get_active_profile_name()
+        if is_multi_user_mode():
+            user = _current_user(handler)
+            if user and user.get("profile_name"):
+                name = str(user.get("profile_name"))
+        return j(handler, {"name": name, "path": str(get_active_hermes_home())})
 
     # ── Gateway Status (GET) ──
     if parsed.path == "/api/gateway/status":
@@ -3804,8 +4051,14 @@ def handle_post(handler, parsed) -> bool:
                 diag.finish()
 
     if parsed.path == "/api/upload":
+        scope_err = _require_scope(handler, "files")
+        if scope_err:
+            return scope_err
         return handle_upload(handler)
     if parsed.path == "/api/upload/extract":
+        scope_err = _require_scope(handler, "files")
+        if scope_err:
+            return scope_err
         return handle_upload_extract(handler)
 
     if parsed.path == "/api/transcribe":
@@ -3820,6 +4073,18 @@ def handle_post(handler, parsed) -> bool:
             diag.finish()
         raise
 
+    if (
+        parsed.path.startswith("/api/session")
+        or parsed.path.startswith("/api/sessions")
+        or parsed.path.startswith("/api/chat")
+        or parsed.path in ("/api/btw", "/api/background", "/api/goal")
+    ):
+        scope_err = _require_scope(handler, "chat")
+        if scope_err:
+            if diag:
+                diag.finish()
+            return scope_err
+
     if parsed.path == "/api/session/recovery/repair-safe":
         from api.session_recovery import repair_safe_session_recovery
         result = repair_safe_session_recovery(SESSION_DIR, state_db_path=_active_state_db_path())
@@ -3832,6 +4097,135 @@ def handle_post(handler, parsed) -> bool:
         if result is False:
             return _kanban_unknown_endpoint(handler, parsed, "POST")
         return True
+
+    if parsed.path == "/api/setup/admin":
+        from api.auth import get_password_hash
+
+        if users_count() > 0 or get_password_hash() is not None:
+            return bad(handler, "Admin setup is not available", 409)
+        username = str(body.get("username", "")).strip().lower()
+        display_name = str(body.get("display_name", "")).strip() or username
+        password = str(body.get("password", ""))
+        if not username:
+            return bad(handler, "username is required", 400)
+        if not password:
+            return bad(handler, "password is required", 400)
+        try:
+            user = create_user(
+                username=username,
+                password=password,
+                display_name=display_name,
+                role="admin",
+                status="active",
+                profile_name=username,
+            )
+            from api.auth import create_session, set_auth_cookie
+
+            cookie_val = create_session(user_id=int(user["id"]))
+            payload = json.dumps(
+                {
+                    "ok": True,
+                    "user": {
+                        "id": user.get("id"),
+                        "username": user.get("username"),
+                        "display_name": user.get("display_name"),
+                        "role": user.get("role"),
+                        "status": user.get("status"),
+                        "profile_name": user.get("profile_name"),
+                    },
+                },
+                ensure_ascii=False,
+            ).encode("utf-8")
+            handler.send_response(200)
+            handler.send_header("Content-Type", "application/json; charset=utf-8")
+            handler.send_header("Content-Length", str(len(payload)))
+            handler.send_header("Cache-Control", "no-store")
+            _security_headers(handler)
+            set_auth_cookie(handler, cookie_val)
+            handler.end_headers()
+            handler.wfile.write(payload)
+            return True
+        except ValueError as e:
+            return bad(handler, str(e), 400)
+
+    if parsed.path == "/api/admin/users":
+        scope_err = _require_scope(handler, "admin")
+        if scope_err:
+            return scope_err
+        perm_err = _require_admin(handler)
+        if perm_err:
+            return perm_err
+        try:
+            username = validate_username(body.get("username", ""))
+            password = str(body.get("password", ""))
+            if not password:
+                return bad(handler, "password is required", 400)
+            user = create_user(
+                username=username,
+                password=password,
+                display_name=body.get("display_name"),
+                role=str(body.get("role") or "user"),
+                status=str(body.get("status") or "active"),
+                profile_name=str(body.get("profile_name") or username),
+            )
+            return j(handler, {"ok": True, "user": user}, status=201)
+        except ValueError as e:
+            return bad(handler, str(e), 400)
+
+    if parsed.path == "/api/tokens":
+        scope_err = _require_scope(handler, "chat")
+        if scope_err:
+            return scope_err
+        user = _current_user(handler)
+        if not user:
+            return bad(handler, "Token management requires multi-user login", 400)
+        try:
+            scopes = normalize_scopes(body.get("scopes"))
+        except ValueError as e:
+            return bad(handler, str(e), 400)
+        if "admin" in scopes and str(user.get("role")) != "admin":
+            return bad(handler, "Only admin users can mint admin-scoped tokens", 403)
+        expires_at = None
+        if body.get("expires_in_seconds") is not None:
+            try:
+                ttl = int(body.get("expires_in_seconds"))
+                if ttl <= 0:
+                    return bad(handler, "expires_in_seconds must be > 0", 400)
+                expires_at = time.time() + ttl
+            except (TypeError, ValueError):
+                return bad(handler, "expires_in_seconds must be an integer", 400)
+        token = create_api_token(
+            user_id=int(user["id"]),
+            name=str(body.get("name") or "token"),
+            scopes=scopes,
+            expires_at=expires_at,
+        )
+        return j(handler, {"ok": True, "token": token}, status=201)
+
+    _m = re.match(r"^/api/admin/users/(\d+)/(reset-password|disable)$", parsed.path or "")
+    if _m:
+        scope_err = _require_scope(handler, "admin")
+        if scope_err:
+            return scope_err
+        perm_err = _require_admin(handler)
+        if perm_err:
+            return perm_err
+        user_id = int(_m.group(1))
+        action = _m.group(2)
+        if action == "reset-password":
+            new_pw = str(body.get("password", ""))
+            if not new_pw:
+                return bad(handler, "password is required", 400)
+            try:
+                set_user_password(user_id, new_pw)
+                return j(handler, {"ok": True, "user_id": user_id})
+            except ValueError as e:
+                return bad(handler, str(e), 400)
+        try:
+            user = _update_user(user_id, status="disabled")
+            return j(handler, {"ok": True, "user": user})
+        except ValueError as e:
+            return bad(handler, str(e), 400)
     if parsed.path == "/api/dashboard/config":
         from api import dashboard_probe
 
@@ -3845,6 +4239,9 @@ def handle_post(handler, parsed) -> bool:
         return True
 
     if parsed.path == "/api/session/new":
+        scope_err = _require_scope(handler, "chat")
+        if scope_err:
+            return scope_err
         try:
             workspace = str(resolve_trusted_workspace(body.get("workspace"))) if body.get("workspace") else None
         except (TypeError, ValueError) as e:
@@ -3873,11 +4270,12 @@ def handle_post(handler, parsed) -> bool:
         )
         # Use the profile sent by the client tab (if any) so that two tabs on
         # different profiles never clobber each other via the process-level global.
+        # In multi-user mode, profile is server-bound to current_user.profile_name.
         s = new_session(
             workspace=workspace,
             model=model,
             model_provider=model_provider,
-            profile=body.get("profile") or None,
+            profile=None if is_multi_user_mode() else (body.get("profile") or None),
             project_id=body.get("project_id") or None,
             worktree_info=worktree_info,
         )
@@ -3889,8 +4287,9 @@ def handle_post(handler, parsed) -> bool:
             if not sid:
                 return bad(handler, "session_id is required")
 
-            session = Session.load(sid)
-            if not session:
+            try:
+                session = get_session(sid)
+            except KeyError:
                 # 404, not 400 — missing resource, not a malformed request.
                 return bad(handler, "Session not found", status=404)
 
@@ -4004,6 +4403,12 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, str(e), 500)
 
     if parsed.path == "/api/admin/reload":
+        scope_err = _require_scope(handler, "admin")
+        if scope_err:
+            return scope_err
+        perm_err = _require_admin(handler)
+        if perm_err:
+            return perm_err
         # Hot-reload api.models module to pick up code changes without restart.
         import importlib
         from api import models as _models
@@ -4426,21 +4831,39 @@ def handle_post(handler, parsed) -> bool:
         return j(handler, {"ok": True, "yolo_enabled": enabled})
 
     if parsed.path == "/api/btw":
+        scope_err = _require_scope(handler, "chat")
+        if scope_err:
+            return scope_err
         return _handle_btw(handler, body)
 
     if parsed.path == "/api/background":
+        scope_err = _require_scope(handler, "chat")
+        if scope_err:
+            return scope_err
         return _handle_background(handler, body)
 
     if parsed.path == "/api/goal":
+        scope_err = _require_scope(handler, "chat")
+        if scope_err:
+            return scope_err
         return _handle_goal_command(handler, body)
 
     if parsed.path == "/api/chat/start":
+        scope_err = _require_scope(handler, "chat")
+        if scope_err:
+            return scope_err
         return _handle_chat_start(handler, body, diag=diag)
 
     if parsed.path == "/api/chat":
+        scope_err = _require_scope(handler, "chat")
+        if scope_err:
+            return scope_err
         return _handle_chat_sync(handler, body)
 
     if parsed.path == "/api/chat/steer":
+        scope_err = _require_scope(handler, "chat")
+        if scope_err:
+            return scope_err
         from api.streaming import _handle_chat_steer
         return _handle_chat_steer(handler, body)
 
@@ -4518,16 +4941,41 @@ def handle_post(handler, parsed) -> bool:
         return _handle_file_path(handler, body)
 
     # ── Workspace management (POST) ──
+    if is_multi_user_mode() and parsed.path in (
+        "/api/workspaces/add",
+        "/api/workspaces/remove",
+        "/api/workspaces/rename",
+        "/api/workspaces/reorder",
+    ):
+        return bad(
+            handler,
+            "Workspace list editing is disabled in multi-user mode. "
+            "Use personal workspace and admin shared workspace rules.",
+            403,
+        )
+
     if parsed.path == "/api/workspaces/add":
+        scope_err = _require_scope(handler, "files")
+        if scope_err:
+            return scope_err
         return _handle_workspace_add(handler, body)
 
     if parsed.path == "/api/workspaces/remove":
+        scope_err = _require_scope(handler, "files")
+        if scope_err:
+            return scope_err
         return _handle_workspace_remove(handler, body)
 
     if parsed.path == "/api/workspaces/rename":
+        scope_err = _require_scope(handler, "files")
+        if scope_err:
+            return scope_err
         return _handle_workspace_rename(handler, body)
 
     if parsed.path == "/api/workspaces/reorder":
+        scope_err = _require_scope(handler, "files")
+        if scope_err:
+            return scope_err
         return _handle_workspace_reorder(handler, body)
 
     # ── Approval (POST) ──
@@ -4551,6 +4999,8 @@ def handle_post(handler, parsed) -> bool:
 
     # ── Profile API (POST) ──
     if parsed.path == "/api/profile/switch":
+        if is_multi_user_mode():
+            return bad(handler, "Profile switching is disabled in multi-user mode", 403)
         name = body.get("name", "").strip()
         if not name:
             return bad(handler, "name is required")
@@ -4576,6 +5026,8 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, str(e), 409)
 
     if parsed.path == "/api/profile/create":
+        if is_multi_user_mode():
+            return bad(handler, "Profile creation is disabled in multi-user mode", 403)
         name = body.get("name", "").strip()
         if not name:
             return bad(handler, "name is required")
@@ -4610,6 +5062,8 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, str(e))
 
     if parsed.path == "/api/profile/delete":
+        if is_multi_user_mode():
+            return bad(handler, "Profile deletion is disabled in multi-user mode", 403)
         name = body.get("name", "").strip()
         if not name:
             return bad(handler, "name is required")
@@ -4626,6 +5080,13 @@ def handle_post(handler, parsed) -> bool:
 
     # ── Settings (POST) ──
     if parsed.path == "/api/settings":
+        if is_multi_user_mode():
+            scope_err = _require_scope(handler, "admin")
+            if scope_err:
+                return scope_err
+            perm_err = _require_admin(handler)
+            if perm_err:
+                return perm_err
         from api.auth import (
             create_session,
             is_auth_enabled,
@@ -4645,6 +5106,14 @@ def handle_post(handler, parsed) -> bool:
             and body.get("_set_password", "").strip()
         )
         requested_clear_password = bool(body.get("_clear_password"))
+
+        if is_multi_user_mode() and (requested_password or requested_clear_password):
+            return bad(
+                handler,
+                "Password changes via /api/settings are disabled in multi-user mode. "
+                "Use user management APIs instead.",
+                409,
+            )
 
         # #1560: HERMES_WEBUI_PASSWORD env var takes precedence in
         # api.auth.get_password_hash(), so writing password_hash to settings.json
@@ -4812,6 +5281,9 @@ def handle_post(handler, parsed) -> bool:
             cli_meta = _lookup_cli_session_metadata(sid)
             if not cli_meta:
                 return bad(handler, "Session not found", 404)
+            active_profile = (_current_user(handler) or {}).get("profile_name")
+            if active_profile and not _profiles_match(cli_meta.get("profile"), active_profile):
+                return bad(handler, "Session not found", 404)
             if cli_meta.get("read_only"):
                 return bad(handler, "Read-only imported sessions cannot be archived from WebUI", 400)
             if _is_messaging_session_record(cli_meta):
@@ -4821,6 +5293,7 @@ def handle_post(handler, parsed) -> bool:
                     workspace=get_last_workspace(),
                     messages=[],
                     model=cli_meta.get("model") or "unknown",
+                    profile=cli_meta.get("profile") or active_profile,
                     created_at=cli_meta.get("created_at"),
                     updated_at=cli_meta.get("updated_at"),
                 )
@@ -4845,7 +5318,7 @@ def handle_post(handler, parsed) -> bool:
                     cli_meta.get("title") or title_from(msgs, "CLI Session"),
                     msgs,
                     cli_meta.get("model") or "unknown",
-                    profile=cli_meta.get("profile"),
+                    profile=cli_meta.get("profile") or active_profile,
                     created_at=cli_meta.get("created_at"),
                     updated_at=cli_meta.get("updated_at"),
                 )
@@ -5016,6 +5489,10 @@ def handle_post(handler, parsed) -> bool:
         )
         from api.auth import _check_login_rate, _record_login_attempt
 
+        from api.auth import get_password_hash
+        if users_count() == 0 and get_password_hash() is None:
+            return bad(handler, "Admin setup required", 409)
+
         if not is_auth_enabled():
             return j(handler, {"ok": True, "message": "Auth not enabled"})
         client_ip = handler.client_address[0]
@@ -5025,18 +5502,42 @@ def handle_post(handler, parsed) -> bool:
                 {"error": "Too many attempts. Try again in a minute."},
                 status=429,
             )
-        password = body.get("password", "")
-        if not verify_password(password):
-            _record_login_attempt(client_ip)
-            return bad(handler, "Invalid password", 401)
-        cookie_val = create_session()
+        user_payload = None
+        if is_multi_user_mode():
+            username = str(body.get("username", "")).strip().lower()
+            password = body.get("password", "")
+            try:
+                user = verify_user_password(username, password)
+            except ValueError:
+                user = None
+            if not user:
+                _record_login_attempt(client_ip)
+                return bad(handler, "Invalid username or password", 401)
+            cookie_val = create_session(user_id=int(user["id"]))
+            user_payload = {
+                "id": user.get("id"),
+                "username": user.get("username"),
+                "display_name": user.get("display_name"),
+                "role": user.get("role"),
+                "status": user.get("status"),
+                "profile_name": user.get("profile_name"),
+            }
+        else:
+            password = body.get("password", "")
+            if not verify_password(password):
+                _record_login_attempt(client_ip)
+                return bad(handler, "Invalid password", 401)
+            cookie_val = create_session()
         handler.send_response(200)
         handler.send_header("Content-Type", "application/json")
         handler.send_header("Cache-Control", "no-store")
         _security_headers(handler)
         set_auth_cookie(handler, cookie_val)
         handler.end_headers()
-        handler.wfile.write(json.dumps({"ok": True}).encode())
+        payload = {"ok": True}
+        if user_payload:
+            payload["user"] = user_payload
+        handler.wfile.write(json.dumps(payload).encode())
         return True
 
     if parsed.path == "/api/auth/logout":
@@ -5086,6 +5587,25 @@ def handle_patch(handler, parsed) -> bool:
         if result is False:
             return _kanban_unknown_endpoint(handler, parsed, "PATCH")
         return True
+    _m = re.match(r"^/api/admin/users/(\d+)$", parsed.path or "")
+    if _m:
+        scope_err = _require_scope(handler, "admin")
+        if scope_err:
+            return scope_err
+        perm_err = _require_admin(handler)
+        if perm_err:
+            return perm_err
+        user_id = int(_m.group(1))
+        try:
+            user = _update_user(
+                user_id,
+                display_name=body.get("display_name") if "display_name" in body else None,
+                role=body.get("role") if "role" in body else None,
+                status=body.get("status") if "status" in body else None,
+            )
+            return j(handler, {"ok": True, "user": user})
+        except ValueError as e:
+            return bad(handler, str(e), 400)
     return False
 
 
@@ -5101,6 +5621,19 @@ def handle_delete(handler, parsed) -> bool:
         if result is False:
             return _kanban_unknown_endpoint(handler, parsed, "DELETE")
         return True
+    _m = re.match(r"^/api/tokens/(\d+)$", parsed.path or "")
+    if _m:
+        scope_err = _require_scope(handler, "chat")
+        if scope_err:
+            return scope_err
+        user = _current_user(handler)
+        if not user:
+            return bad(handler, "Token management requires multi-user login", 400)
+        token_id = int(_m.group(1))
+        ok = revoke_api_token(token_id, user_id=int(user["id"]))
+        if not ok:
+            return bad(handler, "Token not found", 404)
+        return j(handler, {"ok": True, "token_id": token_id})
     return False
 
 # ── GET route helpers ─────────────────────────────────────────────────────────
@@ -5217,21 +5750,31 @@ def _handle_sessions_search(handler, parsed):
 
 
 def _handle_list_dir(handler, parsed):
+    scope_err = _require_scope(handler, "files")
+    if scope_err:
+        return scope_err
     qs = parse_qs(parsed.query)
     sid = qs.get("session_id", [""])[0]
     if not sid:
         return bad(handler, "session_id is required")
     try:
         s = get_session(sid)
+        perm_err = _ensure_session_workspace_allowed(handler, s, write=False)
+        if perm_err:
+            return perm_err
         workspace = s.workspace
     except KeyError:
         # Fallback for CLI sessions not loaded in WebUI memory
         try:
             cli_meta = None
+            active_profile = (_current_user(handler) or {}).get("profile_name")
             for cs in get_cli_sessions():
-                if cs["session_id"] == sid:
-                    cli_meta = cs
-                    break
+                if cs["session_id"] != sid:
+                    continue
+                if active_profile and not _profiles_match(cs.get("profile"), active_profile):
+                    continue
+                cli_meta = cs
+                break
             if not cli_meta:
                 return bad(handler, "Session not found", 404)
             workspace = cli_meta.get("workspace", "")
@@ -5291,7 +5834,7 @@ def _terminal_session_and_workspace(body_or_query):
         s = get_session(sid)
     except KeyError:
         raise KeyError("Session not found")
-    workspace = resolve_trusted_workspace(getattr(s, "workspace", "") or "")
+    workspace = resolve_trusted_workspace(getattr(s, "workspace", "") or "", write=True)
     return sid, workspace
 
 
@@ -5616,13 +6159,14 @@ def _handle_media(handler, parsed):
 
     # Auth check
     if is_auth_enabled():
-        cv = parse_cookie(handler)
-        if not (cv and verify_session(cv)):
-            handler.send_response(401)
-            handler.send_header("Content-Type", "application/json")
-            handler.end_headers()
-            handler.wfile.write(b'{"error":"Authentication required"}')
-            return
+        if not _current_user(handler):
+            cv = parse_cookie(handler)
+            if not (cv and verify_session(cv)):
+                handler.send_response(401)
+                handler.send_header("Content-Type", "application/json")
+                handler.end_headers()
+                handler.wfile.write(b'{"error":"Authentication required"}')
+                return
 
     qs = parse_qs(parsed.query)
     raw_path = qs.get("path", [""])[0].strip()
@@ -5708,6 +6252,9 @@ def _handle_media(handler, parsed):
 
 
 def _handle_file_raw(handler, parsed):
+    scope_err = _require_scope(handler, "files")
+    if scope_err:
+        return scope_err
     qs = parse_qs(parsed.query)
     sid = qs.get("session_id", [""])[0]
     if not sid:
@@ -5716,6 +6263,9 @@ def _handle_file_raw(handler, parsed):
         s = get_session(sid)
     except KeyError:
         return bad(handler, "Session not found", 404)
+    perm_err = _ensure_session_workspace_allowed(handler, s, write=False)
+    if perm_err:
+        return perm_err
     rel = qs.get("path", [""])[0]
     force_download = qs.get("download", [""])[0] == "1"
     target = safe_resolve(Path(s.workspace), rel)
@@ -5744,6 +6294,9 @@ def _handle_file_raw(handler, parsed):
 
 
 def _handle_file_read(handler, parsed):
+    scope_err = _require_scope(handler, "files")
+    if scope_err:
+        return scope_err
     qs = parse_qs(parsed.query)
     sid = qs.get("session_id", [""])[0]
     if not sid:
@@ -5752,6 +6305,9 @@ def _handle_file_read(handler, parsed):
         s = get_session(sid)
     except KeyError:
         return bad(handler, "Session not found", 404)
+    perm_err = _ensure_session_workspace_allowed(handler, s, write=False)
+    if perm_err:
+        return perm_err
     rel = qs.get("path", [""])[0]
     if not rel:
         return bad(handler, "path is required")
@@ -6394,7 +6950,7 @@ def _handle_sessions_cleanup(handler, body, zero_only=False):
         if p.name.startswith("_"):
             continue
         try:
-            s = Session.load(p.stem)
+            s = get_session(p.stem)
             if zero_only:
                 should_delete = s and len(s.messages) == 0
             else:
@@ -6715,23 +7271,25 @@ def _handle_goal_command(handler, body):
     except KeyError:
         return bad(handler, "Session not found", 404)
 
-    requested_profile = str(body.get("profile") or "").strip()
-    if requested_profile:
-        try:
-            from api.profiles import _PROFILE_ID_RE
+    requested_profile = ""
+    if not is_multi_user_mode():
+        requested_profile = str(body.get("profile") or "").strip()
+        if requested_profile:
+            try:
+                from api.profiles import _PROFILE_ID_RE
 
-            if requested_profile != "default" and not _PROFILE_ID_RE.fullmatch(requested_profile):
-                return bad(handler, "invalid profile", 400)
-        except ImportError:
-            requested_profile = ""
-    if requested_profile and not _profiles_match(getattr(s, "profile", None), requested_profile):
-        has_persisted_turns = bool(
-            getattr(s, "messages", None)
-            or getattr(s, "context_messages", None)
-            or getattr(s, "pending_user_message", None)
-        )
-        if not has_persisted_turns:
-            s.profile = requested_profile
+                if requested_profile != "default" and not _PROFILE_ID_RE.fullmatch(requested_profile):
+                    return bad(handler, "invalid profile", 400)
+            except ImportError:
+                requested_profile = ""
+        if requested_profile and not _profiles_match(getattr(s, "profile", None), requested_profile):
+            has_persisted_turns = bool(
+                getattr(s, "messages", None)
+                or getattr(s, "context_messages", None)
+                or getattr(s, "pending_user_message", None)
+            )
+            if not has_persisted_turns:
+                s.profile = requested_profile
 
     current_stream_id = getattr(s, "active_stream_id", None)
     stream_running = False
@@ -6761,7 +7319,7 @@ def _handle_goal_command(handler, body):
     previous_goal_state = None
     if will_kickoff:
         try:
-            workspace = str(resolve_trusted_workspace(body.get("workspace") or s.workspace))
+            workspace = str(resolve_trusted_workspace(body.get("workspace") or s.workspace, write=True))
         except ValueError as e:
             return bad(handler, str(e))
         requested_model = body.get("model") or s.model
@@ -6790,7 +7348,7 @@ def _handle_goal_command(handler, body):
     if kickoff_prompt:
         if workspace is None:
             try:
-                workspace = str(resolve_trusted_workspace(body.get("workspace") or s.workspace))
+                workspace = str(resolve_trusted_workspace(body.get("workspace") or s.workspace, write=True))
             except ValueError as e:
                 return bad(handler, str(e))
         if model is None:
@@ -6837,27 +7395,28 @@ def _handle_chat_start(handler, body, diag=None):
         except KeyError:
             return bad(handler, "Session not found", 404)
         diag.stage("validate_profile") if diag else None
-        requested_profile = str(body.get("profile") or "").strip()
-        if requested_profile:
-            try:
-                from api.profiles import _PROFILE_ID_RE
+        if not is_multi_user_mode():
+            requested_profile = str(body.get("profile") or "").strip()
+            if requested_profile:
+                try:
+                    from api.profiles import _PROFILE_ID_RE
 
-                if requested_profile != "default" and not _PROFILE_ID_RE.fullmatch(requested_profile):
-                    return bad(handler, "invalid profile", 400)
-            except ImportError:
-                requested_profile = ""
-        if requested_profile and not _profiles_match(getattr(s, "profile", None), requested_profile):
-            has_persisted_turns = bool(
-                getattr(s, "messages", None)
-                or getattr(s, "context_messages", None)
-                or getattr(s, "pending_user_message", None)
-            )
-            if not has_persisted_turns:
-                # Empty sessions are placeholders. If the user switches profiles
-                # before sending the first turn, run the placeholder under the
-                # currently-selected profile instead of the stale one stamped at
-                # creation time.
-                s.profile = requested_profile
+                    if requested_profile != "default" and not _PROFILE_ID_RE.fullmatch(requested_profile):
+                        return bad(handler, "invalid profile", 400)
+                except ImportError:
+                    requested_profile = ""
+            if requested_profile and not _profiles_match(getattr(s, "profile", None), requested_profile):
+                has_persisted_turns = bool(
+                    getattr(s, "messages", None)
+                    or getattr(s, "context_messages", None)
+                    or getattr(s, "pending_user_message", None)
+                )
+                if not has_persisted_turns:
+                    # Empty sessions are placeholders. If the user switches profiles
+                    # before sending the first turn, run the placeholder under the
+                    # currently-selected profile instead of the stale one stamped at
+                    # creation time.
+                    s.profile = requested_profile
         diag.stage("normalize_message") if diag else None
         msg = str(body.get("message", "")).strip()
         if not msg:
@@ -6866,7 +7425,7 @@ def _handle_chat_start(handler, body, diag=None):
         attachments = _normalize_chat_attachments(body.get("attachments") or [])[:20]
         diag.stage("resolve_workspace") if diag else None
         try:
-            workspace = str(resolve_trusted_workspace(body.get("workspace") or s.workspace))
+            workspace = str(resolve_trusted_workspace(body.get("workspace") or s.workspace, write=True))
         except ValueError as e:
             return bad(handler, str(e))
         requested_model = body.get("model") or s.model
@@ -6936,7 +7495,7 @@ def _handle_chat_sync(handler, body):
     if not msg:
         return j(handler, {"error": "empty message"}, status=400)
     try:
-        workspace = str(resolve_trusted_workspace(body.get("workspace") or s.workspace))
+        workspace = str(resolve_trusted_workspace(body.get("workspace") or s.workspace, write=True))
     except ValueError as e:
         return bad(handler, str(e))
     with _get_session_agent_lock(s.session_id):
@@ -7103,7 +7662,7 @@ def _handle_cron_create(handler, body):
     try:
         from cron.jobs import create_job, update_job
 
-        profile = _normalize_cron_profile_value(body.get("profile"))
+        profile = _normalize_cron_profile_for_request(handler, body.get("profile"))
         job = create_job(
             prompt=body["prompt"],
             schedule=body["schedule"],
@@ -7115,6 +7674,8 @@ def _handle_cron_create(handler, body):
         if profile is not None:
             job = update_job(job["id"], {"profile": profile}) or job
         return j(handler, {"ok": True, "job": _cron_job_for_api(job)})
+    except PermissionError as e:
+        return bad(handler, str(e), 403)
     except Exception as e:
         return j(handler, {"error": str(e)}, status=400)
 
@@ -7132,9 +7693,11 @@ def _handle_cron_update(handler, body):
             if k == "job_id":
                 continue
             if k == "profile":
-                updates[k] = _normalize_cron_profile_value(v)
+                updates[k] = _normalize_cron_profile_for_request(handler, v)
             elif v is not None:
                 updates[k] = v
+    except PermissionError as e:
+        return bad(handler, str(e), 403)
     except ValueError as e:
         return bad(handler, str(e))
     job = update_job(body["job_id"], updates)
@@ -7216,6 +7779,9 @@ def _handle_cron_resume(handler, body):
 
 
 def _handle_file_delete(handler, body):
+    scope_err = _require_scope(handler, "files")
+    if scope_err:
+        return scope_err
     try:
         require(body, "session_id", "path")
     except ValueError as e:
@@ -7224,6 +7790,9 @@ def _handle_file_delete(handler, body):
         s = get_session(body["session_id"])
     except KeyError:
         return bad(handler, "Session not found", 404)
+    perm_err = _ensure_session_workspace_allowed(handler, s, write=True)
+    if perm_err:
+        return perm_err
     try:
         target = safe_resolve(Path(s.workspace), body["path"])
         if not target.exists():
@@ -7240,6 +7809,9 @@ def _handle_file_delete(handler, body):
 
 
 def _handle_file_save(handler, body):
+    scope_err = _require_scope(handler, "files")
+    if scope_err:
+        return scope_err
     try:
         require(body, "session_id", "path")
     except ValueError as e:
@@ -7248,6 +7820,9 @@ def _handle_file_save(handler, body):
         s = get_session(body["session_id"])
     except KeyError:
         return bad(handler, "Session not found", 404)
+    perm_err = _ensure_session_workspace_allowed(handler, s, write=True)
+    if perm_err:
+        return perm_err
     try:
         target = safe_resolve(Path(s.workspace), body["path"])
         if not target.exists():
@@ -7263,6 +7838,9 @@ def _handle_file_save(handler, body):
 
 
 def _handle_file_create(handler, body):
+    scope_err = _require_scope(handler, "files")
+    if scope_err:
+        return scope_err
     try:
         require(body, "session_id", "path")
     except ValueError as e:
@@ -7271,6 +7849,9 @@ def _handle_file_create(handler, body):
         s = get_session(body["session_id"])
     except KeyError:
         return bad(handler, "Session not found", 404)
+    perm_err = _ensure_session_workspace_allowed(handler, s, write=True)
+    if perm_err:
+        return perm_err
     try:
         target = safe_resolve(Path(s.workspace), body["path"])
         if target.exists():
@@ -7285,6 +7866,9 @@ def _handle_file_create(handler, body):
 
 
 def _handle_file_rename(handler, body):
+    scope_err = _require_scope(handler, "files")
+    if scope_err:
+        return scope_err
     try:
         require(body, "session_id", "path", "new_name")
     except ValueError as e:
@@ -7293,6 +7877,9 @@ def _handle_file_rename(handler, body):
         s = get_session(body["session_id"])
     except KeyError:
         return bad(handler, "Session not found", 404)
+    perm_err = _ensure_session_workspace_allowed(handler, s, write=True)
+    if perm_err:
+        return perm_err
     try:
         source = safe_resolve(Path(s.workspace), body["path"])
         if not source.exists():
@@ -7311,6 +7898,9 @@ def _handle_file_rename(handler, body):
 
 
 def _handle_create_dir(handler, body):
+    scope_err = _require_scope(handler, "files")
+    if scope_err:
+        return scope_err
     try:
         require(body, "session_id", "path")
     except ValueError as e:
@@ -7319,6 +7909,9 @@ def _handle_create_dir(handler, body):
         s = get_session(body["session_id"])
     except KeyError:
         return bad(handler, "Session not found", 404)
+    perm_err = _ensure_session_workspace_allowed(handler, s, write=True)
+    if perm_err:
+        return perm_err
     try:
         target = safe_resolve(Path(s.workspace), body["path"])
         if target.exists():
@@ -7332,6 +7925,9 @@ def _handle_create_dir(handler, body):
 
 
 def _handle_file_reveal(handler, body):
+    scope_err = _require_scope(handler, "files")
+    if scope_err:
+        return scope_err
     try:
         require(body, "session_id", "path")
     except ValueError as e:
@@ -7340,6 +7936,9 @@ def _handle_file_reveal(handler, body):
         s = get_session(body["session_id"])
     except KeyError:
         return bad(handler, "Session not found", 404)
+    perm_err = _ensure_session_workspace_allowed(handler, s, write=False)
+    if perm_err:
+        return perm_err
     try:
         target = safe_resolve(Path(s.workspace), body["path"])
         if not target.exists():
@@ -7366,6 +7965,9 @@ def _handle_file_reveal(handler, body):
 
 
 def _handle_file_path(handler, body):
+    scope_err = _require_scope(handler, "files")
+    if scope_err:
+        return scope_err
     """Resolve a relative workspace-rooted path into an absolute on-disk path.
 
     The right-click "Copy file path" action (#1764) wants to put the
@@ -7387,6 +7989,9 @@ def _handle_file_path(handler, body):
         s = get_session(body["session_id"])
     except KeyError:
         return bad(handler, "Session not found", 404)
+    perm_err = _ensure_session_workspace_allowed(handler, s, write=False)
+    if perm_err:
+        return perm_err
     try:
         target = safe_resolve(Path(s.workspace), body["path"])
         return j(handler, {"ok": True, "path": str(target)})
@@ -8548,6 +9153,12 @@ def _handle_handoff_summary(handler, body):
 
 
 def _handle_skill_save(handler, body):
+    scope_err = _require_scope(handler, "admin")
+    if scope_err:
+        return scope_err
+    perm_err = _require_admin(handler)
+    if perm_err:
+        return perm_err
     try:
         require(body, "name", "content")
     except ValueError as e:
@@ -8576,6 +9187,12 @@ def _handle_skill_save(handler, body):
 
 
 def _handle_skill_delete(handler, body):
+    scope_err = _require_scope(handler, "admin")
+    if scope_err:
+        return scope_err
+    perm_err = _require_admin(handler)
+    if perm_err:
+        return perm_err
     try:
         require(body, "name")
     except ValueError as e:
@@ -8702,17 +9319,23 @@ def _handle_session_import_cli(handler, body):
         return bad(handler, str(e))
 
     sid = str(body["session_id"])
+    active_profile = (_current_user(handler) or {}).get("profile_name")
 
     # Check if already imported — refresh messages from CLI store if new ones arrived
     existing = Session.load(sid)
     if existing:
+        if active_profile and not _profiles_match(getattr(existing, "profile", None), active_profile):
+            return bad(handler, "Session not found", 404)
         fresh_msgs = get_cli_session_messages(sid)
         changed = False
         cli_meta = None
         for cs in list(get_cli_sessions()):
-            if cs["session_id"] == sid:
-                cli_meta = cs
-                break
+            if cs["session_id"] != sid:
+                continue
+            if active_profile and not _profiles_match(cs.get("profile"), active_profile):
+                continue
+            cli_meta = cs
+            break
         if fresh_msgs and len(fresh_msgs) > len(existing.messages):
             # Prefix-equality guard: only extend if existing messages are a prefix of
             # the fresh CLI messages. Prevents silently dropping WebUI-added messages
@@ -8753,11 +9376,6 @@ def _handle_session_import_cli(handler, body):
             },
         )
 
-    # Fetch messages from CLI store
-    msgs = get_cli_session_messages(sid)
-    if not msgs:
-        return bad(handler, "Session not found in CLI store", 404)
-
     # Get profile, model, timestamps, and title from CLI session metadata
     profile = None
     created_at = None
@@ -8777,25 +9395,37 @@ def _handle_session_import_cli(handler, body):
     cli_parent_session_id = None
     cli_read_only = False
     for cs in get_cli_sessions():
-        if cs["session_id"] == sid:
-            profile = cs.get("profile")
-            model = cs.get("model", "unknown")
-            created_at = cs.get("created_at")
-            updated_at = cs.get("updated_at")
-            cli_title = cs.get("title")
-            cli_source_tag = cs.get("source_tag")
-            cli_raw_source = cs.get("raw_source")
-            cli_session_source = cs.get("session_source")
-            cli_source_label = cs.get("source_label")
-            cli_user_id = cs.get("user_id")
-            cli_chat_id = cs.get("chat_id")
-            cli_chat_type = cs.get("chat_type")
-            cli_thread_id = cs.get("thread_id")
-            cli_session_key = cs.get("session_key")
-            cli_platform = cs.get("platform")
-            cli_parent_session_id = cs.get("parent_session_id")
-            cli_read_only = bool(cs.get("read_only"))
-            break
+        if cs["session_id"] != sid:
+            continue
+        if active_profile and not _profiles_match(cs.get("profile"), active_profile):
+            continue
+        profile = cs.get("profile")
+        model = cs.get("model", "unknown")
+        created_at = cs.get("created_at")
+        updated_at = cs.get("updated_at")
+        cli_title = cs.get("title")
+        cli_source_tag = cs.get("source_tag")
+        cli_raw_source = cs.get("raw_source")
+        cli_session_source = cs.get("session_source")
+        cli_source_label = cs.get("source_label")
+        cli_user_id = cs.get("user_id")
+        cli_chat_id = cs.get("chat_id")
+        cli_chat_type = cs.get("chat_type")
+        cli_thread_id = cs.get("thread_id")
+        cli_session_key = cs.get("session_key")
+        cli_platform = cs.get("platform")
+        cli_parent_session_id = cs.get("parent_session_id")
+        cli_read_only = bool(cs.get("read_only"))
+        break
+    if active_profile and profile and not _profiles_match(profile, active_profile):
+        return bad(handler, "Session not found in CLI store", 404)
+    if profile is None and active_profile:
+        return bad(handler, "Session not found in CLI store", 404)
+
+    # Fetch messages from CLI store
+    msgs = get_cli_session_messages(sid)
+    if not msgs:
+        return bad(handler, "Session not found in CLI store", 404)
 
     # Use the CLI session title if available (e.g., cron job name), otherwise derive from messages
     title = cli_title or title_from(msgs, "CLI Session")
@@ -8888,6 +9518,7 @@ def _handle_session_import(handler, body):
         model=model,
         messages=messages,
         tool_calls=body.get("tool_calls", []),
+        profile=(_current_user(handler) or {}).get("profile_name"),
     )
     s.pinned = body.get("pinned", False)
     with LOCK:

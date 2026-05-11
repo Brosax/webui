@@ -180,6 +180,35 @@ def _migrate_global_workspaces() -> list:
 
 
 def load_workspaces() -> list:
+    try:
+        from api.auth import get_current_user
+        from api.users import ensure_personal_workspace, get_shared_workspace_rules
+
+        current_user = get_current_user()
+    except Exception:
+        current_user = None
+        ensure_personal_workspace = None
+        get_shared_workspace_rules = None
+
+    if current_user and callable(ensure_personal_workspace) and callable(get_shared_workspace_rules):
+        spaces = []
+        try:
+            personal = ensure_personal_workspace(current_user.get("username") or "")
+            spaces.append({"path": str(Path(personal).resolve()), "name": "My Workspace"})
+        except Exception:
+            logger.debug("Failed to resolve personal workspace", exc_info=True)
+        for rule in get_shared_workspace_rules():
+            path = str(rule.get("path") or "").strip()
+            if not path:
+                continue
+            label = Path(path).name or path
+            if rule.get("mode") == "read_only":
+                label = f"{label} (RO)"
+            entry = {"path": path, "name": label, "mode": rule.get("mode", "read_write")}
+            if all(Path(s.get("path", "")).resolve() != Path(path).resolve() for s in spaces if s.get("path")):
+                spaces.append(entry)
+        return spaces or [{"path": _profile_default_workspace(), "name": "Home"}]
+
     ws_file = _workspaces_file()
     if ws_file.exists():
         try:
@@ -518,7 +547,7 @@ def list_workspace_suggestions(prefix: str = "", limit: int = 12) -> list[str]:
     return suggestions[:limit]
 
 
-def resolve_trusted_workspace(path: str | Path | None = None) -> Path:
+def resolve_trusted_workspace(path: str | Path | None = None, *, write: bool = False) -> Path:
     """Resolve and validate a workspace path.
 
     A path is trusted if it satisfies at least one of:
@@ -539,7 +568,22 @@ def resolve_trusted_workspace(path: str | Path | None = None) -> Path:
     None/empty path falls back to the boot-time DEFAULT_WORKSPACE, which is always
     trusted (it was validated at server startup).
     """
+    try:
+        from api.auth import get_current_user
+        from api.users import ensure_personal_workspace, is_workspace_allowed_for_user
+
+        current_user = get_current_user()
+    except Exception:
+        current_user = None
+        ensure_personal_workspace = None
+        is_workspace_allowed_for_user = None
+
     if path in (None, ""):
+        if current_user and callable(ensure_personal_workspace):
+            try:
+                return Path(ensure_personal_workspace(current_user.get("username") or "")).resolve()
+            except Exception:
+                pass
         return Path(_BOOT_DEFAULT_WORKSPACE).expanduser().resolve()
 
     candidate = Path(path).expanduser().resolve()
@@ -547,6 +591,15 @@ def resolve_trusted_workspace(path: str | Path | None = None) -> Path:
     access_error = _workspace_access_error(candidate)
     if access_error:
         raise ValueError(access_error)
+
+    # Multi-user mode: enforce user-bound workspace policy first.
+    if current_user and callable(is_workspace_allowed_for_user):
+        if is_workspace_allowed_for_user(candidate, current_user, write=write):
+            return candidate
+        mode = "write" if write else "read"
+        raise ValueError(
+            f"Workspace path is not allowed for this user ({mode}): {candidate}"
+        )
 
     # (A) Trusted if under the user's home directory — cross-platform via Path.home()
     # Must be checked before system roots to allow symlinks like /var/home.

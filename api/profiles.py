@@ -614,8 +614,16 @@ def _set_hermes_home(home: Path):
     # Patch skills_tool module-level cache (snapshots HERMES_HOME at import)
     try:
         import tools.skills_tool as _sk
+        _skills_dir = home / 'skills'
+        try:
+            from api.users import get_shared_skills_dir, is_multi_user_mode
+
+            if is_multi_user_mode():
+                _skills_dir = get_shared_skills_dir()
+        except Exception:
+            pass
         _sk.HERMES_HOME = home
-        _sk.SKILLS_DIR = home / 'skills'
+        _sk.SKILLS_DIR = _skills_dir
     except (ImportError, AttributeError):
         logger.debug("Failed to patch skills_tool module")
 

@@ -111,7 +111,7 @@ from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
-from api.auth import check_auth
+from api.auth import check_auth, clear_current_user
 from api.config import HOST, PORT, STATE_DIR, SESSION_DIR, DEFAULT_WORKSPACE
 from api.helpers import j, get_profile_cookie
 from api.profiles import set_request_profile, clear_request_profile
@@ -217,13 +217,18 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         self._req_t0 = time.time()
-        # Per-request profile context from cookie (issue #798)
-        cookie_profile = get_profile_cookie(self)
-        if cookie_profile:
-            set_request_profile(cookie_profile)
         try:
             parsed = urlparse(self.path)
             if not check_auth(self, parsed): return
+            # Multi-user mode: enforce the authenticated user's bound profile.
+            current_user = getattr(self, "current_user", None)
+            if isinstance(current_user, dict) and current_user.get("profile_name"):
+                set_request_profile(str(current_user["profile_name"]))
+            else:
+                # Legacy compatibility: keep cookie-based profile selection.
+                cookie_profile = get_profile_cookie(self)
+                if cookie_profile:
+                    set_request_profile(cookie_profile)
             result = handle_get(self, parsed)
             if result is False:
                 return j(self, {'error': 'not found'}, status=404)
@@ -232,16 +237,22 @@ class Handler(BaseHTTPRequestHandler):
             return j(self, {'error': 'Internal server error'}, status=500)
         finally:
             clear_request_profile()
+            clear_current_user()
+            if hasattr(self, "current_user"):
+                self.current_user = None
 
     def _handle_write(self, route_func) -> None:
         self._req_t0 = time.time()
-        # Per-request profile context from cookie (issue #798)
-        cookie_profile = get_profile_cookie(self)
-        if cookie_profile:
-            set_request_profile(cookie_profile)
         try:
             parsed = urlparse(self.path)
             if not check_auth(self, parsed): return
+            current_user = getattr(self, "current_user", None)
+            if isinstance(current_user, dict) and current_user.get("profile_name"):
+                set_request_profile(str(current_user["profile_name"]))
+            else:
+                cookie_profile = get_profile_cookie(self)
+                if cookie_profile:
+                    set_request_profile(cookie_profile)
             result = route_func(self, parsed)
             if result is False:
                 return j(self, {'error': 'not found'}, status=404)
@@ -250,6 +261,9 @@ class Handler(BaseHTTPRequestHandler):
             return j(self, {'error': 'Internal server error'}, status=500)
         finally:
             clear_request_profile()
+            clear_current_user()
+            if hasattr(self, "current_user"):
+                self.current_user = None
 
     def do_POST(self) -> None:
         self._handle_write(handle_post)

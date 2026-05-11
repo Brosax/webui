@@ -11,6 +11,7 @@ from api.config import MAX_UPLOAD_BYTES
 from api.helpers import j, bad
 from api.models import get_session
 from api.workspace import safe_resolve_ws
+from api.users import is_workspace_allowed_for_user
 
 
 def parse_multipart(rfile, content_type, content_length) -> tuple:
@@ -78,6 +79,9 @@ def handle_upload(handler):
         except KeyError:
             return j(handler, {'error': 'Session not found'}, status=404)
         workspace = Path(s.workspace)
+        current_user = getattr(handler, "current_user", None)
+        if isinstance(current_user, dict) and not is_workspace_allowed_for_user(workspace, current_user, write=True):
+            return j(handler, {'error': 'Workspace write access denied'}, status=403)
         safe_name = _sanitize_upload_name(filename)
         dest = safe_resolve_ws(workspace, safe_name)
         dest.write_bytes(file_bytes)
@@ -232,6 +236,9 @@ def handle_upload_extract(handler):
         except KeyError:
             return j(handler, {'error': 'Session not found'}, status=404)
         workspace = Path(s.workspace)
+        current_user = getattr(handler, "current_user", None)
+        if isinstance(current_user, dict) and not is_workspace_allowed_for_user(workspace, current_user, write=True):
+            return j(handler, {'error': 'Workspace write access denied'}, status=403)
         result = extract_archive(file_bytes, filename, workspace)
         return j(handler, {'ok': True, **result})
     except ValueError as e:
