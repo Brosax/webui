@@ -4747,16 +4747,16 @@ let _settingsPreferencesAutosaveTimer = null;
 let _settingsPreferencesAutosaveRetryPayload = null;
 
 function switchSettingsSection(name){
-  const section=(name==='appearance'||name==='preferences'||name==='providers'||name==='plugins'||name==='system')?name:'conversation';
+  const section=(name==='appearance'||name==='preferences'||name==='providers'||name==='plugins'||name==='users'||name==='system')?name:'conversation';
   _settingsSection=section;
   _currentSettingsSection=section;
-  const map={conversation:'Conversation',appearance:'Appearance',preferences:'Preferences',providers:'Providers',plugins:'Plugins',system:'System'};
+  const map={conversation:'Conversation',appearance:'Appearance',preferences:'Preferences',providers:'Providers',plugins:'Plugins',users:'Users',system:'System'};
   // Sidebar menu items
   document.querySelectorAll('#settingsMenu .side-menu-item').forEach(it=>{
     it.classList.toggle('active', it.dataset.settingsSection===section);
   });
   // Panes in main
-  ['conversation','appearance','preferences','providers','plugins','system'].forEach(key=>{
+  ['conversation','appearance','preferences','providers','plugins','users','system'].forEach(key=>{
     const pane=$('settingsPane'+map[key]);
     if(pane) pane.classList.toggle('active', key===section);
   });
@@ -4766,6 +4766,7 @@ function switchSettingsSection(name){
   // Lazy-load integration panels when their tabs are opened
   if(section==='providers') loadProvidersPanel();
   if(section==='plugins') loadPluginsPanel();
+  if(section==='users') loadUsersPanel();
 }
 
 function _syncHermesPanelSessionActions(){
@@ -6308,5 +6309,382 @@ async function _restoreCheckpoint(workspace,checkpoint,message){
     }
   }catch(e){
     showToast(t('checkpoint_restore')+': '+e.message,'error');
+  }
+}
+
+// ── Users Panel ─────────────────────────────────────────────────────────────
+
+let _usersCache=[];
+let _authMode=null; // 'multi' | 'legacy' | null
+let _currentUserCache=null;
+
+async function loadUsersPanel(){
+  try{
+    const status=await api('/api/auth/status');
+    const isMulti=!!(status&&status.multi_user);
+    const isAdmin=!!(status&&status.user&&status.user.role==='admin');
+    _currentUserCache=status&&status.user?status.user:null;
+    const adminView=$('usersAdminView');
+    const selfView=$('usersSelfView');
+    const legacyView=$('usersLegacyView');
+    const tokensSection=$('usersTokensSection');
+    if(!adminView||!selfView||!legacyView) return;
+    if(!isMulti){
+      _authMode='legacy';
+      adminView.style.display='none';
+      selfView.style.display='none';
+      legacyView.style.display='block';
+      if(tokensSection) tokensSection.style.display='none';
+      return;
+    }
+    _authMode='multi';
+    legacyView.style.display='none';
+    if(isAdmin){
+      adminView.style.display='block';
+      selfView.style.display='none';
+      if(tokensSection) tokensSection.style.display='block';
+      await _loadUsersDirectory();
+    }else{
+      adminView.style.display='none';
+      selfView.style.display='block';
+      if(tokensSection) tokensSection.style.display='block';
+      _renderSelfSummary(_currentUserCache);
+    }
+    await _loadTokens();
+  }catch(e){
+    showToast('Failed to load users panel: '+e.message,'error');
+  }
+}
+
+async function _loadUsersDirectory(){
+  try{
+    const data=await api('/api/admin/users');
+    _usersCache=Array.isArray(data.users)?data.users:[];
+    _renderUsersStats(_usersCache);
+    _renderUsersTable(_usersCache);
+  }catch(e){
+    showToast('Failed to load users: '+e.message,'error');
+  }
+}
+
+function _renderUsersStats(users){
+  const row=$('usersStatsRow');
+  if(!row) return;
+  const total=users.length;
+  const active=users.filter(u=>u.status==='active').length;
+  const disabled=users.filter(u=>u.status==='disabled').length;
+  const admins=users.filter(u=>u.role==='admin').length;
+  row.innerHTML=`
+    <div class="users-stat"><span class="users-stat-num">${total}</span><span class="users-stat-label">Total</span></div>
+    <div class="users-stat"><span class="users-stat-num" style="color:var(--success)">${active}</span><span class="users-stat-label">Active</span></div>
+    <div class="users-stat"><span class="users-stat-num" style="color:var(--muted)">${disabled}</span><span class="users-stat-label">Disabled</span></div>
+    <div class="users-stat"><span class="users-stat-num" style="color:var(--accent)">${admins}</span><span class="users-stat-label">Admin</span></div>
+  `;
+}
+
+function _renderUsersTable(users){
+  const body=$('usersTableBody');
+  const empty=$('usersEmpty');
+  if(!body) return;
+  if(!users.length){
+    body.innerHTML='';
+    if(empty) empty.style.display='block';
+    return;
+  }
+  if(empty) empty.style.display='none';
+  let html='';
+  for(const u of users){
+    const isSelf=_currentUserCache&&u.id===_currentUserCache.id;
+    const roleBadge=u.role==='admin'
+      ?'<span class="users-badge users-badge-admin">admin</span>'
+      :'<span class="users-badge">user</span>';
+    const statusBadge=u.status==='active'
+      ?'<span class="users-badge users-badge-active">active</span>'
+      :'<span class="users-badge users-badge-disabled">disabled</span>';
+    const updated=u.updated_at?new Date(u.updated_at*1000).toLocaleDateString():'—';
+    html+=`<div class="users-row" data-uid="${u.id}" data-username="${esc(u.username)}" data-display="${esc(u.display_name)}" data-role="${u.role}" data-status="${u.status}">
+      <div class="users-row-main">
+        <div class="users-row-identity">
+          <span class="users-row-name">${esc(u.display_name)}</span>
+          <span class="users-row-username">@${esc(u.username)}</span>
+        </div>
+        <div class="users-row-badges">${roleBadge}${statusBadge}</div>
+        <div class="users-row-meta">${esc(u.profile_name||u.username)} · Updated ${esc(updated)}</div>
+        <div class="users-row-actions">
+          ${isSelf?'<span class="users-self-tag">you</span>':`
+            <button class="users-action-btn" title="Edit" onclick="editUser(${u.id})"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/></svg></button>
+            <button class="users-action-btn" title="Reset password" onclick="resetUserPassword(${u.id},'${esc(u.username)}')"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg></button>
+            ${u.status==='active'?`<button class="users-action-btn users-action-danger" title="Disable" onclick="disableUser(${u.id},'${esc(u.username)}')"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/></svg></button>`:`<button class="users-action-btn" title="Enable" onclick="enableUser(${u.id})"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg></button>`}
+          `}
+        </div>
+      </div>
+      <div class="users-row-edit" id="userEdit_${u.id}" style="display:none"></div>
+    </div>`;
+  }
+  body.innerHTML=html;
+}
+
+function filterUsersTable(){
+  const q=($('usersSearch')?$('usersSearch').value:'').toLowerCase();
+  const role=$('usersFilterRole')?$('usersFilterRole').value:'';
+  const status=$('usersFilterStatus')?$('usersFilterStatus').value:'';
+  const rows=document.querySelectorAll('#usersTableBody .users-row');
+  rows.forEach(row=>{
+    const uname=(row.dataset.username||'').toLowerCase();
+    const dname=(row.dataset.display||'').toLowerCase();
+    const matchQ=!q||uname.includes(q)||dname.includes(q);
+    const matchRole=!role||row.dataset.role===role;
+    const matchStatus=!status||row.dataset.status===status;
+    row.style.display=(matchQ&&matchRole&&matchStatus)?'':'none';
+  });
+}
+
+function showCreateUserForm(){
+  const form=$('usersCreateForm');
+  if(form) form.style.display='block';
+  const un=$('newUserUsername');if(un) un.focus();
+}
+function hideCreateUserForm(){
+  const form=$('usersCreateForm');
+  if(form) form.style.display='none';
+  ['newUserUsername','newUserDisplayName','newUserPassword','newUserProfileName'].forEach(id=>{const el=$(id);if(el) el.value='';});
+  const r=$('newUserRole');if(r) r.value='user';
+  const s=$('newUserStatus');if(s) s.value='active';
+}
+
+async function submitCreateUser(){
+  const username=($('newUserUsername')||{}).value||'';
+  const display_name=($('newUserDisplayName')||{}).value||'';
+  const password=($('newUserPassword')||{}).value||'';
+  const profile_name=($('newUserProfileName')||{}).value||'';
+  const role=($('newUserRole')||{}).value||'user';
+  const status=($('newUserStatus')||{}).value||'active';
+  if(!username.trim()){showToast('Username is required','error');return;}
+  if(!password){showToast('Password is required','error');return;}
+  try{
+    await api('/api/admin/users',{method:'POST',body:JSON.stringify({username:username.trim(),display_name:display_name.trim()||username.trim(),password,role,status,profile_name:profile_name.trim()||username.trim()})});
+    showToast('User created');
+    hideCreateUserForm();
+    await _loadUsersDirectory();
+  }catch(e){
+    showToast('Create user failed: '+e.message,'error');
+  }
+}
+
+async function editUser(uid){
+  const user=_usersCache.find(u=>u.id===uid);
+  if(!user) return;
+  const editDiv=$('userEdit_'+uid);
+  if(!editDiv) return;
+  // Toggle
+  if(editDiv.style.display!=='none'){editDiv.style.display='none';return;}
+  // Close all other edit forms
+  document.querySelectorAll('.users-row-edit').forEach(el=>{el.style.display='none';});
+  editDiv.innerHTML=`
+    <div class="users-edit-form">
+      <div class="users-form-row">
+        <div class="users-form-field">
+          <label>Display Name</label>
+          <input type="text" id="editDisplayName_${uid}" value="${esc(user.display_name)}">
+        </div>
+        <div class="users-form-field">
+          <label>Role</label>
+          <select id="editRole_${uid}">
+            <option value="user" ${user.role==='user'?'selected':''}>User</option>
+            <option value="admin" ${user.role==='admin'?'selected':''}>Admin</option>
+          </select>
+        </div>
+        <div class="users-form-field">
+          <label>Status</label>
+          <select id="editStatus_${uid}">
+            <option value="active" ${user.status==='active'?'selected':''}>Active</option>
+            <option value="disabled" ${user.status==='disabled'?'selected':''}>Disabled</option>
+          </select>
+        </div>
+      </div>
+      <div class="users-form-actions">
+        <button class="sm-btn" onclick="submitEditUser(${uid})">Save</button>
+        <button class="sm-btn users-cancel-btn" onclick="closeEditUser(${uid})">Cancel</button>
+      </div>
+    </div>`;
+  editDiv.style.display='block';
+}
+
+function closeEditUser(uid){
+  const editDiv=$('userEdit_'+uid);
+  if(editDiv) editDiv.style.display='none';
+}
+
+async function submitEditUser(uid){
+  const display_name=($('editDisplayName_'+uid)||{}).value||'';
+  const role=($('editRole_'+uid)||{}).value||'';
+  const status=($('editStatus_'+uid)||{}).value||'';
+  try{
+    await api('/api/admin/users/'+uid,{method:'PATCH',body:JSON.stringify({display_name:display_name.trim(),role,status})});
+    showToast('User updated');
+    closeEditUser(uid);
+    await _loadUsersDirectory();
+  }catch(e){
+    showToast('Update failed: '+e.message,'error');
+  }
+}
+
+async function resetUserPassword(uid,username){
+  const ok=await showConfirmDialog({title:'Reset Password',message:`Reset password for @${username}? They will need the new password to log in.`,confirmLabel:'Reset',danger:false,focusCancel:true});
+  if(!ok) return;
+  const newPw=prompt('Enter new password for @'+username+':');
+  if(!newPw) return;
+  try{
+    await api('/api/admin/users/'+uid+'/reset-password',{method:'POST',body:JSON.stringify({password:newPw})});
+    showToast('Password reset for @'+username);
+  }catch(e){
+    showToast('Reset failed: '+e.message,'error');
+  }
+}
+
+async function disableUser(uid,username){
+  const ok=await showConfirmDialog({title:'Disable User',message:`Disable @${username}? They won't be able to log in.`,confirmLabel:'Disable',danger:true,focusCancel:true});
+  if(!ok) return;
+  try{
+    await api('/api/admin/users/'+uid+'/disable',{method:'POST',body:JSON.stringify({})});
+    showToast('@'+username+' disabled');
+    await _loadUsersDirectory();
+  }catch(e){
+    showToast('Disable failed: '+e.message,'error');
+  }
+}
+
+async function enableUser(uid){
+  try{
+    await api('/api/admin/users/'+uid,{method:'PATCH',body:JSON.stringify({status:'active'})});
+    showToast('User enabled');
+    await _loadUsersDirectory();
+  }catch(e){
+    showToast('Enable failed: '+e.message,'error');
+  }
+}
+
+function _renderSelfSummary(user){
+  const el=$('usersSelfSummary');
+  if(!el||!user) return;
+  const roleBadge=user.role==='admin'
+    ?'<span class="users-badge users-badge-admin">admin</span>'
+    :'<span class="users-badge">user</span>';
+  el.innerHTML=`
+    <div class="users-self-card">
+      <div style="font-size:15px;font-weight:600;color:var(--text)">${esc(user.display_name)} ${roleBadge}</div>
+      <div style="font-size:12px;color:var(--muted);margin-top:4px">@${esc(user.username)} · Profile: ${esc(user.profile_name||user.username)}</div>
+    </div>`;
+}
+
+// ── API Tokens ──────────────────────────────────────────────────────────────
+
+async function _loadTokens(){
+  try{
+    const data=await api('/api/tokens');
+    const tokens=Array.isArray(data.tokens)?data.tokens:[];
+    _renderTokensList(tokens);
+  }catch(e){
+    // Non-logged-in or legacy mode: hide tokens section gracefully
+    const sec=$('usersTokensSection');
+    if(sec) sec.style.display='none';
+  }
+}
+
+function _renderTokensList(tokens){
+  const list=$('tokensList');
+  const empty=$('tokensEmpty');
+  if(!list) return;
+  if(!tokens.length){
+    list.innerHTML='';
+    if(empty) empty.style.display='block';
+    return;
+  }
+  if(empty) empty.style.display='none';
+  let html='';
+  for(const t of tokens){
+    const scopes=(t.scopes||[]).map(s=>`<span class="users-badge">${esc(s)}</span>`).join('');
+    const created=t.created_at?new Date(t.created_at*1000).toLocaleDateString():'—';
+    const lastUsed=t.last_used_at?new Date(t.last_used_at*1000).toLocaleString():'Never';
+    const expires=t.expires_at?new Date(t.expires_at*1000).toLocaleDateString():'Never';
+    const revoked=t.revoked_at?new Date(t.revoked_at*1000).toLocaleDateString():null;
+    const statusHtml=revoked
+      ?`<span class="users-badge users-badge-disabled">revoked ${esc(revoked)}</span>`
+      :'<span class="users-badge users-badge-active">active</span>';
+    html+=`<div class="users-token-row">
+      <div class="users-token-info">
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+          <span style="font-size:13px;font-weight:500;color:var(--text)">${esc(t.name)}</span>
+          <code style="font-size:11px;color:var(--muted)">${esc(t.prefix)}…</code>
+          ${statusHtml}
+          ${scopes}
+        </div>
+        <div style="font-size:11px;color:var(--muted);margin-top:4px">
+          Created ${esc(created)} · Last used ${esc(lastUsed)} · Expires ${esc(expires)}
+        </div>
+      </div>
+      <div style="flex-shrink:0">
+        ${!revoked?`<button class="users-action-btn users-action-danger" title="Revoke" onclick="revokeToken(${t.id},'${esc(t.name)}')"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 1 2 2 2v2"/></svg></button>`:''}
+      </div>
+    </div>`;
+  }
+  list.innerHTML=html;
+}
+
+function showCreateTokenForm(){
+  const form=$('tokenCreateForm');
+  if(form) form.style.display='block';
+  const banner=$('tokenCreatedBanner');
+  if(banner) banner.style.display='none';
+  const nm=$('newTokenName');if(nm) nm.focus();
+}
+function hideCreateTokenForm(){
+  const form=$('tokenCreateForm');
+  if(form) form.style.display='none';
+  const nm=$('newTokenName');if(nm) nm.value='';
+  const sc=$('newTokenScopeChat');if(sc) sc.checked=true;
+  const sf=$('newTokenScopeFiles');if(sf) sf.checked=true;
+  const sa=$('newTokenScopeAdmin');if(sa) sa.checked=false;
+}
+
+async function submitCreateToken(){
+  const name=($('newTokenName')||{}).value||'token';
+  const scopes=[];
+  if(($('newTokenScopeChat')||{}).checked) scopes.push('chat');
+  if(($('newTokenScopeFiles')||{}).checked) scopes.push('files');
+  if(($('newTokenScopeAdmin')||{}).checked) scopes.push('admin');
+  if(!scopes.length){showToast('Select at least one scope','error');return;}
+  try{
+    const data=await api('/api/tokens',{method:'POST',body:JSON.stringify({name:name.trim(),scopes})});
+    if(data&&data.token&&data.token.token){
+      const banner=$('tokenCreatedBanner');
+      const val=$('tokenCreatedValue');
+      if(banner) banner.style.display='flex';
+      if(val) val.textContent=data.token.token;
+    }
+    showToast('Token created');
+    hideCreateTokenForm();
+    await _loadTokens();
+  }catch(e){
+    showToast('Create token failed: '+e.message,'error');
+  }
+}
+
+let _lastCreatedToken='';
+function copyCreatedToken(){
+  const val=$('tokenCreatedValue');
+  if(!val) return;
+  navigator.clipboard.writeText(val.textContent).then(()=>showToast('Copied')).catch(()=>showToast('Copy failed','error'));
+}
+
+async function revokeToken(tid,name){
+  const ok=await showConfirmDialog({title:'Revoke Token',message:`Revoke token "${name}"? It will stop working immediately.`,confirmLabel:'Revoke',danger:true,focusCancel:true});
+  if(!ok) return;
+  try{
+    await api('/api/tokens/'+tid,{method:'DELETE'});
+    showToast('Token revoked');
+    await _loadTokens();
+  }catch(e){
+    showToast('Revoke failed: '+e.message,'error');
   }
 }

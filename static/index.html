@@ -288,6 +288,10 @@
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 2l3 7h7l-5.5 4.3 2.1 7L12 16.2 5.4 20.3l2.1-7L2 9h7z"/></svg>
           <span>Plugins</span>
         </button>
+        <button type="button" class="side-menu-item" data-settings-section="users" onclick="switchSettingsSection('users')">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+          <span>Users</span>
+        </button>
         <button type="button" class="side-menu-item" data-settings-section="system" onclick="switchSettingsSection('system')">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="3" width="20" height="8" rx="2"/><rect x="2" y="13" width="20" height="8" rx="2"/><line x1="6" y1="7" x2="6.01" y2="7"/><line x1="6" y1="17" x2="6.01" y2="17"/></svg>
           <span>System</span>
@@ -1077,6 +1081,130 @@
             </div>
             <div id="pluginsEmpty" style="display:none;text-align:center;padding:32px 0;color:var(--muted);font-size:13px">
               No Hermes plugins are currently visible. Install or enable plugins from the Hermes CLI/config to see them here.
+            </div>
+          </div>
+          <div class="settings-pane" id="settingsPaneUsers">
+            <div class="settings-section-head">
+              <div>
+                <div class="settings-section-title">Users</div>
+                <div class="settings-section-meta">Manage users and API tokens.</div>
+              </div>
+            </div>
+            <!-- Admin: user directory -->
+            <div id="usersAdminView" style="display:none">
+              <div class="users-stats-row" id="usersStatsRow"></div>
+              <div class="users-toolbar">
+                <input type="search" id="usersSearch" class="users-search" placeholder="Search username, display name…" oninput="filterUsersTable()" autocomplete="off">
+                <select id="usersFilterRole" class="users-filter" onchange="filterUsersTable()">
+                  <option value="">All roles</option>
+                  <option value="admin">Admin</option>
+                  <option value="user">User</option>
+                </select>
+                <select id="usersFilterStatus" class="users-filter" onchange="filterUsersTable()">
+                  <option value="">All status</option>
+                  <option value="active">Active</option>
+                  <option value="disabled">Disabled</option>
+                </select>
+                <button class="sm-btn users-create-btn" onclick="showCreateUserForm()">+ New User</button>
+              </div>
+              <div id="usersCreateForm" class="users-create-form" style="display:none">
+                <div class="users-form-row">
+                  <div class="users-form-field">
+                    <label>Username</label>
+                    <input type="text" id="newUserUsername" placeholder="lowercase, a-z 0-9 - _" autocomplete="off">
+                  </div>
+                  <div class="users-form-field">
+                    <label>Display Name</label>
+                    <input type="text" id="newUserDisplayName" placeholder="Display name">
+                  </div>
+                </div>
+                <div class="users-form-row">
+                  <div class="users-form-field">
+                    <label>Password</label>
+                    <input type="password" id="newUserPassword" placeholder="Password">
+                  </div>
+                  <div class="users-form-field">
+                    <label>Profile Name</label>
+                    <input type="text" id="newUserProfileName" placeholder="Defaults to username">
+                  </div>
+                </div>
+                <div class="users-form-row">
+                  <div class="users-form-field">
+                    <label>Role</label>
+                    <select id="newUserRole">
+                      <option value="user">User</option>
+                      <option value="admin">Admin</option>
+                    </select>
+                  </div>
+                  <div class="users-form-field">
+                    <label>Status</label>
+                    <select id="newUserStatus">
+                      <option value="active">Active</option>
+                      <option value="disabled">Disabled</option>
+                    </select>
+                  </div>
+                </div>
+                <div class="users-form-actions">
+                  <button class="sm-btn" onclick="submitCreateUser()">Create User</button>
+                  <button class="sm-btn users-cancel-btn" onclick="hideCreateUserForm()">Cancel</button>
+                </div>
+              </div>
+              <div id="usersTableWrap" class="users-table-wrap">
+                <div id="usersTableBody"></div>
+              </div>
+              <div id="usersEmpty" style="display:none;text-align:center;padding:32px 0;color:var(--muted);font-size:13px">
+                No users found.
+              </div>
+            </div>
+            <!-- Non-admin: own account summary + tokens -->
+            <div id="usersSelfView" style="display:none">
+              <div id="usersSelfSummary" class="users-self-summary"></div>
+            </div>
+            <!-- Legacy single-password mode -->
+            <div id="usersLegacyView" style="display:none">
+              <div style="text-align:center;padding:32px 0;color:var(--muted);font-size:13px;line-height:1.6">
+                User management is not available in single-password mode.<br>
+                Use the <strong>System</strong> panel to manage the Access Password.
+              </div>
+            </div>
+            <!-- API Tokens (shared by admin and non-admin) -->
+            <div id="usersTokensSection" style="margin-top:24px;padding-top:20px;border-top:1px solid var(--border)">
+              <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
+                <div>
+                  <div style="font-size:15px;font-weight:600;color:var(--text)">API Tokens</div>
+                  <div style="font-size:12px;color:var(--muted)">Manage API tokens for programmatic access.</div>
+                </div>
+                <button class="sm-btn" onclick="showCreateTokenForm()">+ New Token</button>
+              </div>
+              <div id="tokenCreateForm" class="users-create-form" style="display:none">
+                <div class="users-form-row">
+                  <div class="users-form-field">
+                    <label>Token Name</label>
+                    <input type="text" id="newTokenName" placeholder="e.g. ci-bot" autocomplete="off">
+                  </div>
+                  <div class="users-form-field">
+                    <label>Scopes</label>
+                    <div class="users-scope-checks">
+                      <label><input type="checkbox" id="newTokenScopeChat" checked> chat</label>
+                      <label><input type="checkbox" id="newTokenScopeFiles" checked> files</label>
+                      <label><input type="checkbox" id="newTokenScopeAdmin"> admin</label>
+                    </div>
+                  </div>
+                </div>
+                <div class="users-form-actions">
+                  <button class="sm-btn" onclick="submitCreateToken()">Create Token</button>
+                  <button class="sm-btn users-cancel-btn" onclick="hideCreateTokenForm()">Cancel</button>
+                </div>
+              </div>
+              <div id="tokenCreatedBanner" class="users-token-banner" style="display:none">
+                <div style="font-size:12px;font-weight:600;color:var(--success);margin-bottom:4px">Token created — copy it now, it won't be shown again:</div>
+                <code id="tokenCreatedValue" class="users-token-value"></code>
+                <button class="sm-btn" style="margin-left:8px;padding:4px 10px;font-size:11px" onclick="copyCreatedToken()">Copy</button>
+              </div>
+              <div id="tokensList"></div>
+              <div id="tokensEmpty" style="display:none;text-align:center;padding:24px 0;color:var(--muted);font-size:13px">
+                No API tokens yet.
+              </div>
             </div>
           </div>
           <div class="settings-pane" id="settingsPaneSystem">
