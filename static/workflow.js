@@ -229,3 +229,25 @@ window.renderWorkflowPanel = renderWorkflowPanel;
 window.openWorkflowDetail = openWorkflowDetail;
 window.closeWorkflowDetail = closeWorkflowDetail;
 window.showWorkflowCreateModal = showWorkflowCreateModal;
+
+/* Integration: trigger workflow from Skills panel */
+async function triggerWorkflowFromSkill(skillName, params) {
+  // Create task with skill as input
+  const task = await api('/api/workflow/tasks', {
+    method: 'POST',
+    body: JSON.stringify({
+      name: `Skill: ${skillName}`,
+      input: { skill: skillName, params }
+    })
+  });
+
+  if (task.data) {
+    _workflowTasks.unshift(task.data);
+    renderWorkflowPanel();
+    openWorkflowDetail(task.data.id);
+    showToast(`Started workflow: ${skillName}`);
+  }
+}
+
+// Export for skills integration
+window.triggerWorkflowFromSkill = triggerWorkflowFromSkill;
