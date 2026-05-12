@@ -3815,3 +3815,157 @@ main.main.showing-logs > #mainLogs{display:flex;}
   .shared-ws-row-main{flex-direction:column;align-items:flex-start;gap:6px;}
   .shared-ws-row-actions{margin-left:0;width:100%;justify-content:flex-end;}
 }
+
+/* ── Workflow Panel ──────────────────────────────────────────────────────── */
+.panel-view#panelWorkflow {
+  padding: 16px;
+  overflow-y: auto;
+}
+
+.panel-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.panel-header h3 {
+  flex: 1;
+  margin: 0;
+}
+
+.workflow-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.workflow-card {
+  background: var(--bg-secondary, #1a1a2e);
+  border: 1px solid var(--border-color, #333);
+  border-radius: 8px;
+  padding: 12px;
+  cursor: pointer;
+  transition: border-color 0.2s;
+}
+
+.workflow-card:hover {
+  border-color: var(--accent-color, #4a9eff);
+}
+
+.workflow-card-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.workflow-card-name {
+  flex: 1;
+  font-weight: 500;
+}
+
+.workflow-card-status {
+  font-size: 12px;
+  color: var(--text-secondary, #888);
+}
+
+.workflow-card-meta {
+  font-size: 12px;
+  color: var(--text-secondary, #888);
+  display: flex;
+  justify-content: space-between;
+}
+
+.workflow-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.detail-section {
+  background: var(--bg-secondary, #1a1a2e);
+  border-radius: 8px;
+  padding: 12px;
+}
+
+.detail-section h4 {
+  margin: 0 0 8px 0;
+  font-size: 14px;
+  color: var(--text-secondary, #888);
+}
+
+.detail-code {
+  background: var(--bg-primary, #0f0f1a);
+  padding: 8px;
+  border-radius: 4px;
+  font-size: 12px;
+  overflow-x: auto;
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.call-card, .artifact-card {
+  border: 1px solid var(--border-color, #333);
+  border-radius: 6px;
+  padding: 8px;
+  margin-bottom: 8px;
+}
+
+.call-header, .artifact-card-content {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.call-index {
+  font-weight: 500;
+}
+
+.call-status, .status-badge {
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+}
+
+.status-pending { background: #666; }
+.status-running { background: #4a9eff; }
+.status-completed { background: #2ecc71; }
+.status-failed { background: #e74c3c; }
+
+.btn-back {
+  background: none;
+  border: none;
+  color: var(--accent-color, #4a9eff);
+  cursor: pointer;
+  font-size: 14px;
+}
+
+details {
+  margin: 4px 0;
+}
+
+summary {
+  cursor: pointer;
+  padding: 4px 0;
+  font-size: 12px;
+  color: var(--text-secondary, #888);
+}
+
+.call-error {
+  color: var(--error-color, #e74c3c);
+  font-size: 12px;
+  margin: 4px 0;
+}
+
+.empty-state {
+  text-align: center;
+  color: var(--text-secondary, #888);
+  padding: 32px;
+}
+
+.call-card-loading {
+  color: var(--muted);
+  font-size: 12px;
+}
