@@ -871,6 +871,21 @@ from api.helpers import (
 from api.agent_health import build_agent_health_payload
 from api.request_diagnostics import RequestDiagnostics
 from api.system_health import build_system_health_payload
+from api.workflow import (
+    create_task,
+    get_task,
+    list_tasks,
+    update_task,
+    delete_task,
+    create_agent_call,
+    get_agent_call,
+    get_task_calls,
+    update_agent_call,
+    create_artifact,
+    get_artifact,
+    get_artifact_content,
+    get_task_artifacts,
+)
 
 
 def _kanban_unknown_endpoint(handler, parsed, method: str) -> bool:
@@ -3123,6 +3138,58 @@ def handle_get(handler, parsed) -> bool:
         if result is False:
             return _kanban_unknown_endpoint(handler, parsed, "GET")
         return True
+
+    # ── Workflow API ──
+    _WORKFLOW_TASKS_PREFIX = "/api/workflow/tasks/"
+    _WORKFLOW_ARTIFACTS_PREFIX = "/api/workflow/artifacts/"
+
+    if parsed.path == "/api/workflow/tasks":
+        return j(handler, {"success": True, "data": list_tasks()})
+
+    if parsed.path.startswith(_WORKFLOW_TASKS_PREFIX):
+        task_id = parsed.path[len(_WORKFLOW_TASKS_PREFIX):].split("/")[0]
+        if not task_id:
+            return bad(handler, "task_id is required", 400)
+        task = get_task(task_id)
+        if not task:
+            return bad(handler, "Task not found", 404)
+        # /api/workflow/tasks/{task_id}/calls
+        if parsed.path == f"/api/workflow/tasks/{task_id}/calls":
+            return j(handler, {"success": True, "data": get_task_calls(task_id)})
+        # /api/workflow/tasks/{task_id}/artifacts
+        if parsed.path == f"/api/workflow/tasks/{task_id}/artifacts":
+            return j(handler, {"success": True, "data": get_task_artifacts(task_id)})
+        # /api/workflow/tasks/{task_id}/calls/{call_id}
+        if parsed.path.startswith(f"/api/workflow/tasks/{task_id}/calls/"):
+            call_id = parsed.path[len(f"/api/workflow/tasks/{task_id}/calls/"):].split("/")[0]
+            if call_id:
+                call = get_agent_call(call_id)
+                if not call:
+                    return bad(handler, "Call not found", 404)
+                return j(handler, {"success": True, "data": call})
+        # /api/workflow/tasks/{task_id} (base task endpoint)
+        return j(handler, {"success": True, "data": task})
+
+    if parsed.path.startswith(_WORKFLOW_ARTIFACTS_PREFIX):
+        artifact_id = parsed.path[len(_WORKFLOW_ARTIFACTS_PREFIX):].split("/")[0]
+        if not artifact_id:
+            return bad(handler, "artifact_id is required", 400)
+        # /api/workflow/artifacts/{artifact_id}/content
+        if parsed.path == f"/api/workflow/artifacts/{artifact_id}/content":
+            content = get_artifact_content(artifact_id)
+            if content is None:
+                return bad(handler, "Artifact not found", 404)
+            handler.send_response(200)
+            handler.send_header("Content-Type", "text/plain; charset=utf-8")
+            handler.end_headers()
+            handler.wfile.write(content.encode("utf-8"))
+            return True
+        # /api/workflow/artifacts/{artifact_id}
+        artifact = get_artifact(artifact_id)
+        if not artifact:
+            return bad(handler, "Artifact not found", 404)
+        return j(handler, {"success": True, "data": artifact})
+
     if parsed.path == "/api/wiki/status":
         return _handle_llm_wiki_status(handler, parsed)
     if parsed.path == "/api/logs":
@@ -4117,6 +4184,49 @@ def handle_post(handler, parsed) -> bool:
         if result is False:
             return _kanban_unknown_endpoint(handler, parsed, "POST")
         return True
+
+    # ── Workflow API ──
+    if parsed.path == "/api/workflow/tasks":
+        name = body.get("name", "Untitled Task")
+        input_data = body.get("input", {})
+        current_user = _current_user(handler)
+        created_by = current_user.get("username", "unknown") if current_user else "unknown"
+        task = create_task(name, input_data, created_by)
+        return j(handler, {"success": True, "data": task})
+
+    if parsed.path.startswith("/api/workflow/tasks/") and "/calls" in parsed.path:
+        # /api/workflow/tasks/{task_id}/calls
+        parts = parsed.path.split("/")
+        # parts = ["", "api", "workflow", "tasks", "{task_id}", "calls"]
+        if len(parts) >= 6 and parts[5] == "calls":
+            task_id = parts[4]
+            call = create_agent_call(
+                task_id,
+                body.get("agent_name", "unknown"),
+                body.get("parent_call_id"),
+                body.get("input"),
+            )
+            if not call:
+                return bad(handler, "Task not found", 404)
+            return j(handler, {"success": True, "data": call})
+
+    if parsed.path.startswith("/api/workflow/tasks/") and "/artifacts" in parsed.path:
+        # /api/workflow/tasks/{task_id}/artifacts
+        parts = parsed.path.split("/")
+        # parts = ["", "api", "workflow", "tasks", "{task_id}", "artifacts"]
+        if len(parts) >= 6 and parts[5] == "artifacts":
+            task_id = parts[4]
+            artifact = create_artifact(
+                task_id,
+                body.get("call_id", ""),
+                body.get("name", "file.txt"),
+                body.get("content", ""),
+                body.get("type", "document"),
+                body.get("metadata"),
+            )
+            if not artifact:
+                return bad(handler, "Task not found", 404)
+            return j(handler, {"success": True, "data": artifact})
 
     if parsed.path == "/api/setup/admin":
         from api.auth import get_password_hash
@@ -5673,6 +5783,18 @@ def handle_patch(handler, parsed) -> bool:
         if result is False:
             return _kanban_unknown_endpoint(handler, parsed, "PATCH")
         return True
+
+    # ── Workflow API ──
+    # /api/workflow/tasks/{task_id}/calls/{call_id}
+    _wf_call_match = re.match(r"^/api/workflow/tasks/([^/]+)/calls/([^/]+)$", parsed.path or "")
+    if _wf_call_match:
+        task_id = _wf_call_match.group(1)
+        call_id = _wf_call_match.group(2)
+        call = update_agent_call(call_id, **body)
+        if not call:
+            return bad(handler, "Call not found", 404)
+        return j(handler, {"success": True, "data": call})
+
     _m = re.match(r"^/api/admin/users/(\d+)$", parsed.path or "")
     if _m:
         scope_err = _require_scope(handler, "admin")
@@ -5707,6 +5829,16 @@ def handle_delete(handler, parsed) -> bool:
         if result is False:
             return _kanban_unknown_endpoint(handler, parsed, "DELETE")
         return True
+
+    # ── Workflow API ──
+    # /api/workflow/tasks/{task_id}
+    _wf_task_match = re.match(r"^/api/workflow/tasks/([^/]+)$", parsed.path or "")
+    if _wf_task_match:
+        task_id = _wf_task_match.group(1)
+        if delete_task(task_id):
+            return j(handler, {"success": True})
+        return bad(handler, "Task not found", 404)
+
     _m = re.match(r"^/api/tokens/(\d+)$", parsed.path or "")
     if _m:
         scope_err = _require_scope(handler, "chat")
