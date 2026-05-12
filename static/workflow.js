@@ -44,7 +44,7 @@ function renderTaskCard(task) {
   const artifactsCount = task.artifacts?.length || 0;
 
   return `
-    <div class="workflow-card" onclick="openWorkflowDetail('${task.id}')">
+    <div class="workflow-card" data-task-id="${escapeHtml(task.id)}" onclick="openWorkflowDetail(this.dataset.taskId)">
       <div class="workflow-card-header">
         <span class="workflow-card-icon">${statusIcon}</span>
         <span class="workflow-card-name">${escapeHtml(task.name)}</span>
@@ -114,7 +114,7 @@ async function loadCallDetails(callIds) {
           el.innerHTML = renderCallCardContent(call);
         }
       });
-    } catch (e) {}
+    } catch (e) { console.warn('Failed to load call details:', e); }
   }
 }
 
@@ -149,7 +149,7 @@ async function loadArtifactDetails(artifactIds) {
       if (el && res.data) {
         el.innerHTML = renderArtifactCardContent(res.data);
       }
-    } catch (e) {}
+    } catch (e) { console.warn('Failed to load artifact details:', e); }
   }
 }
 
