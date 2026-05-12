@@ -223,13 +223,13 @@ async function switchPanel(name, opts = {}) {
   // showing-<name> class on <main>; no class means chat (the default).
   const mainEl = document.querySelector('main.main');
   if (mainEl) {
-    ['settings','skills','memory','tasks','kanban','workspaces','profiles','insights','logs'].forEach(p => {
+    ['settings','skills','memory','tasks','workspaces','profiles','insights','logs'].forEach(p => {
       mainEl.classList.toggle('showing-' + p, nextPanel === p);
     });
   }
   // Lazy-load panel data
   if (nextPanel === 'tasks') await loadCrons();
-  if (nextPanel === 'kanban') await loadKanban();
+  // if (nextPanel === 'kanban') await loadKanban();
   if (nextPanel === 'skills') await loadSkills();
   if (nextPanel === 'memory') await loadMemory();
   if (nextPanel === 'workspaces') await loadWorkspacesPanel();
@@ -5193,7 +5193,16 @@ async function loadSettingsPanel(){
     const syncCb=$('settingsSyncInsights');
     if(syncCb){syncCb.checked=!!settings.sync_to_insights;syncCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
     const updateCb=$('settingsCheckUpdates');
-    if(updateCb){updateCb.checked=settings.check_for_updates!==false;updateCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
+    if(updateCb){
+      updateCb.checked=false;
+      updateCb.disabled=true;
+      updateCb.title='Update prompts are disabled in this build';
+    }
+    const checkUpdatesBtn=$('btnCheckUpdatesNow');
+    if(checkUpdatesBtn){
+      checkUpdatesBtn.disabled=true;
+      checkUpdatesBtn.title='Update checks are disabled in this build';
+    }
     const soundCb=$('settingsSoundEnabled');
     if(soundCb){soundCb.checked=!!settings.sound_enabled;soundCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
     // TTS settings (localStorage-only, no server round-trip needed)
@@ -5802,6 +5811,14 @@ function _applySavedSettingsUi(saved, body, opts){
 }
 
 async function checkUpdatesNow(){
+  if(window._disableUpdatePrompts){
+    const status=$('checkUpdatesStatus');
+    if(status){
+      status.textContent=t('settings_updates_disabled');
+      status.style.color='var(--muted)';
+    }
+    return;
+  }
   const btn=$('btnCheckUpdatesNow');
   const label=$('checkUpdatesLabel');
   const spinner=$('checkUpdatesSpinner');

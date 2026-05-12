@@ -264,7 +264,17 @@ from api.workspace import set_last_workspace
 # Fields that are safe to send to LLM provider APIs.
 # Everything else (attachments, timestamp, _ts, etc.) is display-only
 # metadata added by the webui and must be stripped before the API call.
-_API_SAFE_MSG_KEYS = {'role', 'content', 'tool_calls', 'tool_call_id', 'name', 'refusal'}
+# `reasoning_content` is provider-owned history for some thinking-mode
+# OpenAI-compatible APIs; unlike display-only `reasoning`, it must round-trip.
+_API_SAFE_MSG_KEYS = {'role', 'content', 'tool_calls', 'tool_call_id', 'name', 'refusal', 'reasoning_content'}
+_API_RESTORE_MATCH_KEYS = _API_SAFE_MSG_KEYS - {'reasoning_content'}
+_REASONING_CONTENT_CONTAINER_KEYS = (
+    'additional_kwargs',
+    'metadata',
+    'response_metadata',
+    'provider_metadata',
+    'extra',
+)
 
 _NATIVE_IMAGE_MAX_BYTES = 20 * 1024 * 1024
 
@@ -843,6 +853,27 @@ def _is_minimax_route(provider: str = '', model: str = '', base_url: str = '') -
     return 'minimax' in text or 'minimaxi.com' in text
 
 
+def _is_xiaomi_mimo_route(provider: str = '', model: str = '', base_url: str = '') -> bool:
+    provider_l = str(provider or '').lower()
+    model_l = str(model or '').lower()
+    base_l = str(base_url or '').lower()
+    return (
+        provider_l in {'xiaomi', 'mimo', 'xiaomi-mimo'}
+        or 'mimo' in model_l
+        or 'xiaomimimo.com' in base_l
+    )
+
+
+def _apply_agent_reasoning_config(agent, reasoning_config) -> None:
+    """Refresh reasoning config on agents that do not expose a ctor kwarg."""
+    if agent is None or reasoning_config is None:
+        return
+    try:
+        setattr(agent, 'reasoning_config', reasoning_config)
+    except Exception:
+        logger.debug("Unable to apply agent reasoning_config", exc_info=True)
+
+
 def _aux_title_configured() -> bool:
     """Return True when any auxiliary title_generation config field is meaningfully set."""
     try:
@@ -1415,6 +1446,74 @@ def _maybe_schedule_title_refresh(session, put_event, agent):
     ).start()
 
 
+def _is_provider_error_message(msg) -> bool:
+    if not isinstance(msg, dict):
+        return False
+    if msg.get('_error'):
+        return True
+    if msg.get('role') != 'assistant':
+        return False
+    if msg.get('provider_details') is not None:
+        return True
+    content = msg.get('content')
+    if not isinstance(content, str):
+        return False
+    text = content.strip().lower()
+    if not text:
+        return False
+    error_prefixes = (
+        '**error:**',
+        'error:',
+        '**provider mismatch:**',
+        '**model not found:**',
+        '**rate limit reached:**',
+        '**out of credits:**',
+        '**no response received:**',
+    )
+    return text.startswith(error_prefixes) and (
+        'error code:' in text
+        or 'param incorrect' in text
+        or 'provider details' in text
+        or 'api key' in text
+        or 'rate limit' in text
+        or 'quota' in text
+    )
+
+
+def _extract_provider_reasoning_content(value):
+    """Return provider-owned reasoning_content from common message shapes."""
+    if not isinstance(value, dict):
+        return None
+    direct = value.get('reasoning_content')
+    if isinstance(direct, str) and direct:
+        return direct
+    if direct is not None and not isinstance(direct, (dict, list)):
+        text = str(direct)
+        return text if text else None
+    for key in _REASONING_CONTENT_CONTAINER_KEYS:
+        nested = value.get(key)
+        if isinstance(nested, dict):
+            found = _extract_provider_reasoning_content(nested)
+            if found:
+                return found
+    return None
+
+
+def _promote_provider_reasoning_content(messages):
+    """Put nested provider reasoning_content onto assistant messages in-place."""
+    if not isinstance(messages, list):
+        return messages
+    for msg in messages:
+        if not isinstance(msg, dict) or msg.get('role') != 'assistant':
+            continue
+        if msg.get('reasoning_content'):
+            continue
+        provider_reasoning = _extract_provider_reasoning_content(msg)
+        if provider_reasoning:
+            msg['reasoning_content'] = provider_reasoning
+    return messages
+
+
 def _sanitize_messages_for_api(messages):
     """Return a deep copy of messages with only API-safe fields.
 
@@ -1446,8 +1545,8 @@ def _sanitize_messages_for_api(messages):
     for msg in messages:
         if not isinstance(msg, dict):
             continue
-        # Skip persisted error markers — never send them to the LLM as prior context.
-        if msg.get('_error'):
+        # Skip persisted or client-side error cards — never send them as context.
+        if _is_provider_error_message(msg):
             continue
         role = msg.get('role')
         if role == 'tool':
@@ -1477,6 +1576,8 @@ def _api_safe_message_positions(messages):
     out = []
     for idx, msg in enumerate(messages):
         if not isinstance(msg, dict):
+            continue
+        if _is_provider_error_message(msg):
             continue
         role = msg.get('role')
         if role == 'tool':
@@ -1509,7 +1610,7 @@ def _restore_reasoning_metadata(previous_messages, updated_messages):
     def _safe_projection(msg):
         if not isinstance(msg, dict):
             return None
-        return {k: v for k, v in msg.items() if k in _API_SAFE_MSG_KEYS and msg.get('role')}
+        return {k: v for k, v in msg.items() if k in _API_RESTORE_MATCH_KEYS and msg.get('role')}
 
     def _reasoning_only_assistant(msg):
         if not isinstance(msg, dict) or msg.get('role') != 'assistant' or not msg.get('reasoning'):
@@ -1527,6 +1628,8 @@ def _restore_reasoning_metadata(previous_messages, updated_messages):
         if isinstance(prev_msg, dict) and isinstance(cur_msg, dict) and _safe_projection(prev_msg) == _safe_projection(cur_msg):
             if prev_msg.get('role') == 'assistant' and prev_msg.get('reasoning') and not cur_msg.get('reasoning'):
                 cur_msg['reasoning'] = prev_msg['reasoning']
+            if prev_msg.get('role') == 'assistant' and prev_msg.get('reasoning_content') and not cur_msg.get('reasoning_content'):
+                cur_msg['reasoning_content'] = prev_msg['reasoning_content']
             if prev_msg.get('timestamp') and not cur_msg.get('timestamp'):
                 cur_msg['timestamp'] = prev_msg['timestamp']
             elif prev_msg.get('_ts') and not cur_msg.get('_ts') and not cur_msg.get('timestamp'):
@@ -2458,6 +2561,7 @@ def _run_agent_streaming(
             _token_sent = False  # tracks whether any streamed tokens were sent
             _self_healed = False  # (#1401) prevents infinite self-heal retries
             _reasoning_text = ''  # accumulates reasoning/thinking trace for persistence
+            _provider_reasoning_content = ''  # exact provider-owned replay field
             _live_tool_calls = []  # tool progress fallback when final messages omit tool IDs
 
             # Throttle: emit metering events at most every 100 ms so the per-message
@@ -2494,8 +2598,8 @@ def _run_agent_streaming(
                 meter().record_token(stream_id, _metering_output_deltas[0])
                 _emit_metering()
 
-            def on_reasoning(text):
-                nonlocal _reasoning_text
+            def on_reasoning(text, **cb_kwargs):
+                nonlocal _reasoning_text, _provider_reasoning_content
                 if text is None:
                     return
                 _reasoning_text += str(text)
@@ -2507,6 +2611,13 @@ def _run_agent_streaming(
                 _metering_reasoning_deltas[0] += 1
                 meter().record_reasoning(stream_id, _metering_reasoning_deltas[0])
                 _emit_metering()
+                # Some agent/provider adapters surface provider-owned
+                # reasoning_content alongside the display reasoning callback.
+                # Persist only the explicit provider field; display reasoning is
+                # not a valid substitute for strict replay APIs.
+                provider_reasoning = _extract_provider_reasoning_content(cb_kwargs)
+                if provider_reasoning:
+                    _provider_reasoning_content = provider_reasoning
 
             def on_interim_assistant(text, **cb_kwargs):
                 if text is None:
@@ -2833,6 +2944,12 @@ def _run_agent_streaming(
                 _reasoning_config = _parse_reff(_effort_raw)
             except Exception:
                 _reasoning_config = None
+            # MiMo's OpenAI-compatible thinking mode requires provider-owned
+            # reasoning_content to be replayed exactly. Treat WebUI "Default" as
+            # non-thinking for Xiaomi/MiMo so ordinary chats do not enter that
+            # strict mode unless the user explicitly enables reasoning.
+            if _reasoning_config is None and _is_xiaomi_mimo_route(resolved_provider, resolved_model, resolved_base_url):
+                _reasoning_config = {'enabled': False}
 
             _agent_kwargs = dict(
                 model=resolved_model,
@@ -2927,6 +3044,7 @@ def _run_agent_streaming(
                         logger.debug('[webui] Reusing cached agent for session %s', session_id)
 
                 if agent is not None:
+                    _apply_agent_reasoning_config(agent, _reasoning_config)
                     # Refresh per-turn callbacks — these close over request-scoped
                     # objects (put queue, cancel_event) that are new each request.
                     agent.stream_delta_callback = _agent_kwargs.get('stream_delta_callback')
@@ -2964,6 +3082,7 @@ def _run_agent_streaming(
                         agent._interrupt_message = None
                 else:
                     agent = _AIAgent(**_agent_kwargs)
+                    _apply_agent_reasoning_config(agent, _reasoning_config)
                     with SESSION_AGENT_CACHE_LOCK:
                         SESSION_AGENT_CACHE[session_id] = (agent, _agent_sig)
                         SESSION_AGENT_CACHE.move_to_end(session_id)  # LRU: mark as recently used
@@ -3123,6 +3242,7 @@ def _run_agent_streaming(
                 _ckpt_thread.join(timeout=15)
             with _agent_lock:
                 _result_messages = result.get('messages') or _previous_context_messages
+                _promote_provider_reasoning_content(_result_messages)
                 _next_context_messages = _restore_reasoning_metadata(
                     _previous_context_messages,
                     _result_messages,
@@ -3205,6 +3325,7 @@ def _run_agent_streaming(
                             if 'credential_pool' in _agent_params:
                                 _agent_kwargs['credential_pool'] = _heal_rt.get('credential_pool')
                             agent = _AIAgent(**_agent_kwargs)
+                            _apply_agent_reasoning_config(agent, _reasoning_config)
                             with STREAMS_LOCK:
                                 AGENT_INSTANCES[stream_id] = agent
                             from api.config import SESSION_AGENT_CACHE as _SAC, SESSION_AGENT_CACHE_LOCK as _SAC_L
@@ -3245,6 +3366,7 @@ def _run_agent_streaming(
                                 # Since we're in a flat block, directly run the
                                 # post-result merge logic here.
                                 _result_messages = result.get('messages') or _previous_context_messages
+                                _promote_provider_reasoning_content(_result_messages)
                                 _next_context_messages = _restore_reasoning_metadata(
                                     _previous_context_messages,
                                     _result_messages,
@@ -3471,10 +3593,24 @@ def _run_agent_streaming(
                 # memory until the next turn's save, and the last-turn thinking card
                 # is lost when the user reloads immediately after a response.
                 if _reasoning_text and s.messages:
-                    for _rm in reversed(s.messages):
-                        if isinstance(_rm, dict) and _rm.get('role') == 'assistant':
-                            _rm['reasoning'] = _reasoning_text
-                            break
+                    _reasoning_text = _reasoning_text.strip()
+                    if _reasoning_text:
+                        for _rm in reversed(s.messages):
+                            if isinstance(_rm, dict) and _rm.get('role') == 'assistant':
+                                _rm['reasoning'] = _reasoning_text
+                                break
+                if _provider_reasoning_content:
+                    _provider_reasoning_content = _provider_reasoning_content.strip()
+                    if _provider_reasoning_content:
+                        if isinstance(getattr(s, 'context_messages', None), list):
+                            for _cm in reversed(s.context_messages):
+                                if isinstance(_cm, dict) and _cm.get('role') == 'assistant':
+                                    _cm.setdefault('reasoning_content', _provider_reasoning_content)
+                                    break
+                        for _rm in reversed(s.messages):
+                            if isinstance(_rm, dict) and _rm.get('role') == 'assistant':
+                                _rm.setdefault('reasoning_content', _provider_reasoning_content)
+                                break
                 try:
                     _turn_duration_seconds = max(0.0, time.time() - float(_turn_started_at))
                 except Exception:
@@ -3866,6 +4002,7 @@ def _run_agent_streaming(
                     if 'credential_pool' in _agent_params:
                         _heal_kwargs['credential_pool'] = _heal_rt.get('credential_pool')
                     _heal_agent = _AIAgent(**_heal_kwargs)
+                    _apply_agent_reasoning_config(_heal_agent, _reasoning_config)
                     with STREAMS_LOCK:
                         AGENT_INSTANCES[stream_id] = _heal_agent
                     from api.config import SESSION_AGENT_CACHE as _SAC2, SESSION_AGENT_CACHE_LOCK as _SAC2_L
@@ -3891,6 +4028,7 @@ def _run_agent_streaming(
                             _lock_ctx = _agent_lock if _agent_lock is not None else contextlib.nullcontext()
                             with _lock_ctx:
                                 _result_messages = _heal_result.get('messages') or _previous_context_messages
+                                _promote_provider_reasoning_content(_result_messages)
                                 _next_context_messages = _restore_reasoning_metadata(
                                     _previous_context_messages, _result_messages,
                                 )

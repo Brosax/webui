@@ -7654,6 +7654,7 @@ def _handle_chat_sync(handler, body):
             )
             from api.streaming import (
                 _merge_display_messages_after_agent_result,
+                _promote_provider_reasoning_content,
                 _restore_reasoning_metadata,
                 _sanitize_messages_for_api,
                 _session_context_messages,
@@ -7698,6 +7699,7 @@ def _handle_chat_sync(handler, body):
                 os.environ["HERMES_SESSION_KEY"] = old_session_key
     with _get_session_agent_lock(s.session_id):
         _result_messages = result.get("messages") or _previous_context_messages
+        _promote_provider_reasoning_content(_result_messages)
         _next_context_messages = _restore_reasoning_metadata(
             _previous_context_messages,
             _result_messages,

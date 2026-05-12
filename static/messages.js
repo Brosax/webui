@@ -1217,9 +1217,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           const label=isQuotaExhausted?'Out of credits':isRateLimit?'Rate limit reached':isAuthMismatch?(typeof t==='function'?t('provider_mismatch_label'):'Provider mismatch'):isModelNotFound?(typeof t==='function'?t('model_not_found_label'):'Model not found'):isNoResponse?'No response received':'Error';
           const hint=d.hint?`\n\n*${d.hint}*`:'';
           const details=d.details?String(d.details).replace(/```/g,'`\u200b``'):'';
-          S.messages.push({role:'assistant',content:`**${label}:** ${d.message}${hint}`,provider_details:details});
+          S.messages.push({role:'assistant',content:`**${label}:** ${d.message}${hint}`,provider_details:details,_error:true});
         }catch(_){
-          S.messages.push({role:'assistant',content:'**Error:** An error occurred. Check server logs.'});
+          S.messages.push({role:'assistant',content:'**Error:** An error occurred. Check server logs.',_error:true});
         }
         _markSessionViewed(activeSid, S.messages.length);
         renderMessages({preserveScroll:true});

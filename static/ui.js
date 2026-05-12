@@ -3777,6 +3777,7 @@ function _formatUpdateTargetStatus(label,info){
   return `${label}${branch}: ${info.behind} update${info.behind>1?'s':''}`;
 }
 function _showUpdateBanner(data){
+  if(window._disableUpdatePrompts) return;
   const parts=[];
   const webuiPart=_formatUpdateTargetStatus('WebUI',data.webui);
   const agentPart=_formatUpdateTargetStatus('Agent',data.agent);

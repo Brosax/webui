@@ -3882,7 +3882,7 @@ _SETTINGS_DEFAULTS = {
     "show_tps": False,  # show tokens-per-second chip in assistant message headers
     "show_cli_sessions": False,  # merge CLI sessions from state.db into the sidebar
     "sync_to_insights": False,  # mirror WebUI token usage to state.db for /insights
-    "check_for_updates": True,  # check if webui/agent repos are behind upstream
+    "check_for_updates": False,  # update prompts disabled in this build
     "theme": "dark",  # light | dark | system
     "skin": "default",  # accent color skin: default | ares | mono | slate | poseidon | sisyphus | charizard
     "font_size": "default",  # small | default | large
