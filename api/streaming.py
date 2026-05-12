@@ -415,6 +415,25 @@ def _extract_gateway_routing_metadata(agent, result, requested_model=None, reque
     return None
 
 
+def _resolve_skills_dir(profile_home: str) -> Path:
+    """Return the skills directory for the current agent run.
+
+    In multi-user mode, returns the shared skills directory so every user
+    sees the same shared skill set.  In legacy/single-user mode, returns
+    the profile-local skills directory (profile_home / "skills").
+
+    This is called *inside* the ``_ENV_LOCK`` window so the result is
+    consistent with the concurrent multi-user state at call time.
+    """
+    try:
+        from api.users import is_multi_user_mode, get_shared_skills_dir
+        if is_multi_user_mode():
+            return get_shared_skills_dir()
+    except Exception:
+        pass
+    return Path(profile_home) / "skills"
+
+
 def _build_agent_thread_env(profile_runtime_env: dict | None, workspace: str, session_id: str, profile_home: str) -> dict:
     """Build thread-local agent env with per-run values overriding profile defaults.
 
@@ -2318,41 +2337,42 @@ def _run_agent_streaming(
                 from pathlib import Path as _P
                 import sys as _sys
                 _ph = _P(_profile_home)
+                # Select the correct skills directory: shared in multi-user
+                # mode, profile-local in legacy mode.
+                _skills_dir = _resolve_skills_dir(_profile_home)
                 _sk = _sys.modules.get('tools.skills_tool')
                 if _sk is not None:
                     try:
                         _sk.HERMES_HOME = _ph
-                        _sk.SKILLS_DIR = _ph / 'skills'
+                        _sk.SKILLS_DIR = _skills_dir
                     except AttributeError:
                         pass
                 _sm = _sys.modules.get('tools.skill_manager_tool')
                 if _sm is not None:
                     try:
                         _sm.HERMES_HOME = _ph
-                        _sm.SKILLS_DIR = _ph / 'skills'
+                        _sm.SKILLS_DIR = _skills_dir
                     except AttributeError:
                         pass
+            # ── MCP Server Discovery (inside env window) ──
+            # MUST run while HERMES_HOME is set to the active profile.
+            # `discover_mcp_tools()` reads `~/.hermes/config.yaml` via
+            # `get_hermes_home()`, which uses `os.environ['HERMES_HOME']`.
+            #
+            # NOTE: `_servers` in `tools/mcp_tool.py` is a process-global
+            # registry keyed by server name.  Once profile A registers a
+            # server named e.g. `postgres`, profile B's discovery sees it
+            # as already connected and skips it.  Fully fixing multi-profile
+            # concurrent use requires keying `_servers` by
+            # `(profile_home, name)` upstream in hermes-agent.  This change
+            # fixes the headline bug for users who run a single non-default
+            # profile per WebUI process.
+            try:
+                from tools.mcp_tool import discover_mcp_tools
+                discover_mcp_tools()
+            except Exception:
+                pass  # MCP not available or not configured — non-fatal
         # Lock released — agent runs without holding it
-        # ── MCP Server Discovery (lazy import, idempotent) ──
-        # MUST run AFTER the HERMES_HOME mutation above — `discover_mcp_tools()`
-        # reads `~/.hermes/config.yaml` via `get_hermes_home()`, which uses
-        # `os.environ['HERMES_HOME']`.  Calling it before the mutation always
-        # loaded the default profile's `mcp_servers`, even when the session
-        # was stamped with a non-default profile.  See issue #1968.
-        #
-        # NOTE: `_servers` in `tools/mcp_tool.py` is a process-global registry
-        # keyed by server name.  This means once profile A registers a server
-        # named e.g. `postgres`, profile B's discovery sees it as already
-        # connected and skips it — even if B's config points at a different
-        # binary.  Fully fixing multi-profile concurrent use requires keying
-        # `_servers` by `(profile_home, name)` upstream in hermes-agent; that
-        # lives outside this WebUI repo.  This change fixes the headline bug
-        # for users who run a single non-default profile per WebUI process.
-        try:
-            from tools.mcp_tool import discover_mcp_tools
-            discover_mcp_tools()
-        except Exception:
-            pass  # MCP not available or not configured — non-fatal
 
         # Register a gateway-style notify callback so the approval system can
         # push the `approval` SSE event the moment a dangerous command is

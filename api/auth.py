@@ -58,7 +58,7 @@ def _resolve_session_ttl() -> int:
 
 # ── Public paths (no auth required) ─────────────────────────────────────────
 PUBLIC_PATHS = frozenset({
-    '/login', '/health', '/favicon.ico', '/sw.js',
+    '/', '/login', '/health', '/favicon.ico', '/sw.js',
     '/api/auth/login', '/api/auth/status',
     '/setup-admin',
     '/manifest.json', '/manifest.webmanifest',
@@ -334,8 +334,13 @@ def get_current_user() -> dict | None:
     return current if isinstance(current, dict) else None
 
 
+def get_current_request_path() -> str:
+    return str(getattr(_tls, "current_request_path", "") or "")
+
+
 def clear_current_user() -> None:
     _tls.current_user = None
+    _tls.current_request_path = None
 
 
 def _set_current_user(handler, user: dict | None) -> None:
@@ -401,6 +406,7 @@ def check_auth(handler, parsed) -> bool:
     """Check if request is authorized. Returns True if OK.
     If not authorized, sends 401 (API) or 302 redirect (page) and returns False."""
     clear_current_user()
+    _tls.current_request_path = getattr(parsed, "path", None)
     if hasattr(handler, "current_user"):
         handler.current_user = None
 
@@ -410,6 +416,7 @@ def check_auth(handler, parsed) -> bool:
     setup_mode = (users_count() == 0 and get_password_hash() is None)
     if setup_mode:
         setup_public = {
+            "/",
             "/setup-admin",
             "/api/setup/admin",
             "/api/auth/status",

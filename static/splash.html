@@ -1,0 +1,841 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DEKRA Loading Animation</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background-color: #050505;
+        }
+        canvas {
+            display: block;
+        }
+        #click-prompt {
+            position: fixed;
+            bottom: 36px;
+            left: 50%;
+            transform: translateX(-50%);
+            color: rgba(255, 255, 255, 0.7);
+            font-size: 13px;
+            font-family: 'SF Pro Text', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            letter-spacing: 3px;
+            text-transform: uppercase;
+            cursor: pointer;
+            transition: opacity 0.5s ease;
+            z-index: 100;
+            pointer-events: auto;
+            text-align: center;
+        }
+        #click-prompt.hidden { opacity: 0; }
+        #click-prompt:hover { color: rgba(255, 255, 255, 0.95); }
+        #loading-indicator {
+            position: fixed;
+            bottom: 68px;
+            left: 50%;
+            transform: translateX(-50%);
+            color: rgba(255, 255, 255, 0.5);
+            font-size: 12px;
+            letter-spacing: 1px;
+            display: none;
+            z-index: 100;
+            pointer-events: none;
+        }
+        .ripple {
+            position: fixed;
+            border-radius: 50%;
+            background: rgba(255, 255, 255, 0.3);
+            transform: scale(0);
+            animation: ripple-effect 0.6s linear;
+            pointer-events: none;
+            z-index: 99;
+        }
+        @keyframes ripple-effect {
+            to { transform: scale(4); opacity: 0; }
+        }
+    </style>
+</head>
+<body>
+    <div id="click-prompt">Click to Enter</div>
+    <div id="loading-indicator">Checking authentication...</div>
+    <script src="/static/three.min.js"></script>
+    <script>
+        let scene, camera, renderer;
+        let stalkMesh, tipMesh;
+
+        // 设备适配与渲染密度
+        const isMobile = window.innerWidth <= 900 || /Mobi|Android/i.test(navigator.userAgent);
+        const gridCols = isMobile ? 280 : 350;
+        const gridRows = isMobile ? 140 : 175;
+        const stalksPerCell = 4;
+        const totalCount = gridCols * gridRows * stalksPerCell;
+        const groundWidth = 180;
+        const groundHeight = 90;
+
+        // 核心参数设定
+        const HEIGHT_FACTOR = 0.6; // Spore Height
+        const ZOOM_LEVEL = 37;     // Zoom
+        const TURBULENCE = 1.0;    // Turbulence
+
+        const positions = new Float32Array(totalCount * 3);
+        const baseEulers = new Float32Array(totalCount * 3);
+        const targetScales = new Float32Array(totalCount);
+        const noiseValues = new Float32Array(totalCount);
+        const delays = new Float32Array(totalCount);
+
+        // 物理交互矩阵
+        const bends = new Float32Array(totalCount * 2);
+        const illumination = new Float32Array(totalCount);
+        let hasActiveBends = false;
+        let hasActiveIllum = false;
+
+        // 循环色彩库（从深绿开始）
+        const colorProfiles = [
+            { g1: '#002a00', g2: '#004d00', edge: '#00b300', peak: '#55ff55' }, // 10. 深绿
+            { g1: '#002222', g2: '#005555', edge: '#00aaaa', peak: '#00ffff' }, // 9. 青色
+            { g1: '#001133', g2: '#0033aa', edge: '#3388ff', peak: '#aaddff' }, // 8. 蓝色
+            { g1: '#220044', g2: '#5500aa', edge: '#9933ff', peak: '#ddbbff' }, // 7. 紫色
+            { g1: '#440022', g2: '#aa0055', edge: '#ff3388', peak: '#ffbbdd' }, // 6. 粉色
+            { g1: '#441100', g2: '#aa3300', edge: '#ff6600', peak: '#ffcc88' }, // 5. 橙红
+            { g1: '#443300', g2: '#aa8800', edge: '#ffcc00', peak: '#ffff88' }, // 4. 金黄
+            { g1: '#223300', g2: '#55aa00', edge: '#88ff00', peak: '#ccff88' }, // 3. 黄绿
+            { g1: '#003311', g2: '#00aa44', edge: '#00ff88', peak: '#88ffcc' }, // 2. 薄荷绿
+            { g1: '#111111', g2: '#444444', edge: '#aaaaaa', peak: '#ffffff' }  // 1. 纯白
+        ];
+
+        let currentColorIndex = 0;
+        const colorGrnd1 = new THREE.Color(colorProfiles[0].g1);
+        const colorGrnd2 = new THREE.Color(colorProfiles[0].g2);
+        const colorEdge = new THREE.Color(colorProfiles[0].edge);
+        const colorPeak = new THREE.Color(colorProfiles[0].peak);
+
+        const targetColorGrnd1 = new THREE.Color(colorProfiles[0].g1);
+        const targetColorGrnd2 = new THREE.Color(colorProfiles[0].g2);
+        const targetColorEdge = new THREE.Color(colorProfiles[0].edge);
+        const targetColorPeak = new THREE.Color(colorProfiles[0].peak);
+
+        const shaderUniforms = {
+            uTime: { value: 0 },
+            uNow: { value: 0 },
+            uHeightFactor: { value: HEIGHT_FACTOR },
+            uTurbulence: { value: TURBULENCE },
+            uPlantWavePhase: { value: 0 },
+            uColorGrnd1: { value: colorGrnd1 },
+            uColorGrnd2: { value: colorGrnd2 },
+            uColorEdge: { value: colorEdge },
+            uColorPeak: { value: colorPeak }
+        };
+
+        let startTime = 0;
+        let plantWavePhase = 0;
+        let lastFrameTime = performance.now();
+
+        // 交互参数
+        const mouse = new THREE.Vector2(-1000, -1000);
+        const mouseWorld = new THREE.Vector3();
+        const lastMouseWorld = new THREE.Vector3();
+        const raycaster = new THREE.Raycaster();
+        const plane = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0);
+
+        let mouseLight;
+        let dustParticles;
+        let interactiveDust;
+
+        const maxInteractiveDust = isMobile ? 1000 : 3000;
+        const activeDustPositions = new Float32Array(maxInteractiveDust * 3).fill(9999);
+        const activeDustVelocities = new Float32Array(maxInteractiveDust * 3);
+        const activeDustLifetimes = new Float32Array(maxInteractiveDust);
+        let activeDustIndex = 0;
+
+        // 生成隐藏的高清高度图 (仅执行一次)
+        function generateHeightMap() {
+            const canvasSize = 1024;
+            const offCanvas = document.createElement('canvas');
+            offCanvas.width = canvasSize; offCanvas.height = canvasSize;
+            const ctx = offCanvas.getContext('2d', { willReadFrequently: true });
+
+            ctx.fillStyle = 'black';
+            ctx.fillRect(0, 0, canvasSize, canvasSize);
+
+            // 增加偏移量，使整体向右平移
+            const cx = (canvasSize / 2) + 40;
+            const cy = canvasSize / 2;
+            const scale = 2.5;
+
+            function drawShape() {
+                ctx.beginPath();
+                ctx.moveTo(cx - 60 * scale, cy + 10 * scale);
+                ctx.lineTo(cx - 60 * scale, cy - 80 * scale);
+                ctx.lineTo(cx + 50 * scale, cy - 20 * scale);
+                ctx.lineTo(cx + 55 * scale, cy - 10 * scale);
+                ctx.lineTo(cx + 50 * scale, cy + 1 * scale);
+                ctx.lineTo(cx - 80 * scale, cy + 60 * scale);
+                ctx.lineTo(cx - 80 * scale, cy + 40 * scale);
+                ctx.lineTo(cx + 35 * scale, cy - 10 * scale);
+                ctx.lineTo(cx - 45 * scale, cy - 50 * scale);
+                ctx.lineTo(cx - 45 * scale, cy - 0 * scale);
+                ctx.closePath();
+                ctx.fill();
+                ctx.stroke();
+            }
+
+            ctx.filter = 'blur(6px)';
+            ctx.fillStyle = '#0000ff';
+            ctx.strokeStyle = '#0000ff';
+            ctx.lineWidth = 20;
+            drawShape();
+
+            ctx.filter = 'none';
+            ctx.fillStyle = '#ff0000';
+            ctx.strokeStyle = '#ff0000';
+            ctx.lineWidth = 14;
+            drawShape();
+
+            return ctx.getImageData(0, 0, canvasSize, canvasSize).data;
+        }
+
+        function init() {
+            scene = new THREE.Scene();
+            scene.fog = new THREE.FogExp2(0x050505, 0.015);
+
+            camera = new THREE.PerspectiveCamera(65, window.innerWidth / window.innerHeight, 0.1, 100);
+            camera.position.set(0, 0, ZOOM_LEVEL);
+
+            renderer = new THREE.WebGLRenderer({ antialias: !isMobile, powerPreference: "high-performance" });
+            renderer.setPixelRatio(isMobile ? Math.min(window.devicePixelRatio, 1.5) : window.devicePixelRatio);
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            document.body.appendChild(renderer.domElement);
+
+            // 光照设置
+            const ambientLight = new THREE.AmbientLight(0x2a3c22, 0.6);
+            scene.add(ambientLight);
+            const hemiLight = new THREE.HemisphereLight(0xffffff, 0x102505, 0.4);
+            scene.add(hemiLight);
+            const dirLight = new THREE.DirectionalLight(0xfff5e6, 0.8);
+            dirLight.position.set(12, 22, 14);
+            scene.add(dirLight);
+            const rimLight = new THREE.DirectionalLight(0xdfff00, 0.3);
+            rimLight.position.set(-15, -10, -5);
+            scene.add(rimLight);
+
+            // 动态中心发光点跟随鼠标
+            mouseLight = new THREE.PointLight(colorPeak, 4.0, 120, 2.0);
+            scene.add(mouseLight);
+
+            setupDust();
+            setupGeometry();
+
+            window.addEventListener('resize', onWindowResize, false);
+
+            // 恢复复杂的鼠标与触控追踪
+            window.addEventListener('mousemove', (e) => {
+                mouse.x = (e.clientX / window.innerWidth) * 2 - 1;
+                mouse.y = -(e.clientY / window.innerHeight) * 2 + 1;
+                raycaster.setFromCamera(mouse, camera);
+                raycaster.ray.intersectPlane(plane, mouseWorld);
+            });
+
+            window.addEventListener('touchmove', (e) => {
+                if (e.touches.length > 0) {
+                    mouse.x = (e.touches[0].clientX / window.innerWidth) * 2 - 1;
+                    mouse.y = -(e.touches[0].clientY / window.innerHeight) * 2 + 1;
+                    raycaster.setFromCamera(mouse, camera);
+                    raycaster.ray.intersectPlane(plane, mouseWorld);
+                }
+            }, { passive: true });
+
+            window.addEventListener('touchstart', (e) => {
+                if (e.touches.length > 0) {
+                    mouse.x = (e.touches[0].clientX / window.innerWidth) * 2 - 1;
+                    mouse.y = -(e.touches[0].clientY / window.innerHeight) * 2 + 1;
+                    raycaster.setFromCamera(mouse, camera);
+                    raycaster.ray.intersectPlane(plane, mouseWorld);
+                    lastMouseWorld.copy(mouseWorld);
+                }
+            }, { passive: true });
+
+            // 每 3 秒自动切换到下一种生物色彩
+            setInterval(cycleColors, 3000);
+
+            startTime = performance.now();
+            animate();
+        }
+
+        function cycleColors() {
+            currentColorIndex = (currentColorIndex + 1) % colorProfiles.length;
+            const profile = colorProfiles[currentColorIndex];
+
+            targetColorGrnd1.set(profile.g1);
+            targetColorGrnd2.set(profile.g2);
+            targetColorEdge.set(profile.edge);
+            targetColorPeak.set(profile.peak);
+        }
+
+        function setupDust() {
+            const canvas = document.createElement('canvas');
+            canvas.width = 64; canvas.height = 64;
+            const ctx = canvas.getContext('2d');
+            ctx.beginPath();
+            ctx.arc(32, 32, 30, 0, Math.PI * 2);
+            ctx.fillStyle = '#fff';
+            ctx.fill();
+            const particleTex = new THREE.CanvasTexture(canvas);
+
+            const geom = new THREE.BufferGeometry();
+            const count = isMobile ? 2500 : 8000;
+            const pos = new Float32Array(count * 3);
+            for (let i = 0; i < count * 3; i += 3) {
+                pos[i] = (Math.random() - 0.5) * 180;
+                pos[i + 1] = (Math.random() - 0.5) * 100;
+                pos[i + 2] = (Math.random() - 0.5) * 35 + 2;
+            }
+            geom.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+            const mat = new THREE.PointsMaterial({
+                color: 0xffeebb, size: 0.12, transparent: true, opacity: 0.15,
+                map: particleTex, blending: THREE.AdditiveBlending, depthWrite: false
+            });
+            dustParticles = new THREE.Points(geom, mat);
+            scene.add(dustParticles);
+
+            // 恢复交互产生的高亮灰尘粒子
+            const interactiveGeom = new THREE.BufferGeometry();
+            interactiveGeom.setAttribute('position', new THREE.BufferAttribute(activeDustPositions, 3));
+            const interactiveMat = new THREE.PointsMaterial({
+                color: colorPeak, size: 0.75, transparent: true, opacity: 1.0,
+                map: particleTex, blending: THREE.AdditiveBlending, depthWrite: false
+            });
+            interactiveDust = new THREE.Points(interactiveGeom, interactiveMat);
+            scene.add(interactiveDust);
+        }
+
+        function setupGeometry() {
+            const stalkRadiusTop = isMobile ? 0.03 : 0.02;
+            const stalkRadiusBot = isMobile ? 0.05 : 0.035;
+            const stalkRadial = isMobile ? 3 : 5;
+            const stalkGeom = new THREE.CylinderGeometry(stalkRadiusTop, stalkRadiusBot, 1, stalkRadial);
+            stalkGeom.rotateX(Math.PI / 2);
+            stalkGeom.translate(0, 0, 0.5);
+
+            const tipRadial = isMobile ? 3 : 5;
+            const tipHeight = isMobile ? 2 : 4;
+            const tipRadius = isMobile ? 0.1 : 0.08;
+            const tipGeom = new THREE.SphereGeometry(tipRadius, tipRadial, tipHeight);
+
+            // 恢复高级物理交互 Shader
+            const materialOpts = { roughness: 0.85, metalness: 0.05, vertexColors: true };
+            const onBeforeCompile = (shader, isTip) => {
+                shader.uniforms.uTime = shaderUniforms.uTime;
+                shader.uniforms.uNow = shaderUniforms.uNow;
+                shader.uniforms.uHeightFactor = shaderUniforms.uHeightFactor;
+                shader.uniforms.uTurbulence = shaderUniforms.uTurbulence;
+                shader.uniforms.uPlantWavePhase = shaderUniforms.uPlantWavePhase;
+                shader.uniforms.uColorGrnd1 = shaderUniforms.uColorGrnd1;
+                shader.uniforms.uColorGrnd2 = shaderUniforms.uColorGrnd2;
+                shader.uniforms.uColorEdge = shaderUniforms.uColorEdge;
+                shader.uniforms.uColorPeak = shaderUniforms.uColorPeak;
+
+                shader.vertexShader = `
+                    #define IS_TIP ${isTip ? 1 : 0}
+
+                    uniform float uTime;
+                    uniform float uNow;
+                    uniform float uHeightFactor;
+                    uniform float uTurbulence;
+                    uniform float uPlantWavePhase;
+                    uniform vec3 uColorGrnd1;
+                    uniform vec3 uColorGrnd2;
+                    uniform vec3 uColorEdge;
+                    uniform vec3 uColorPeak;
+
+                    attribute vec3 aBasePosition;
+                    attribute vec3 aBaseEuler;
+                    attribute float aTargetScale;
+                    attribute float aDelay;
+                    attribute float aNoise;
+                    attribute vec2 aBend;          // 物理弯曲属性
+                    attribute float aIllumination; // 高亮属性
+
+                    varying float vDisplayHeight;
+                    varying float vNoise;
+                    varying float vIllum;
+
+                    mat3 gpuRotation;
+                    float gpuDisplayHeight;
+
+                    mat3 rotX(float a) { float c = cos(a), s = sin(a); return mat3(1.0, 0.0, 0.0, 0.0, c, s, 0.0, -s, c); }
+                    mat3 rotY(float a) { float c = cos(a), s = sin(a); return mat3(c, 0.0, -s, 0.0, 1.0, 0.0, s, 0.0, c); }
+                    mat3 rotZ(float a) { float c = cos(a), s = sin(a); return mat3(c, s, 0.0, -s, c, 0.0, 0.0, 0.0, 1.0); }
+
+                    ${shader.vertexShader}
+                `;
+
+                shader.vertexShader = shader.vertexShader.replace(
+                    '#include <defaultnormal_vertex>',
+                    `
+                    float progress = clamp((uTime - aDelay) / 2000.0, 0.0, 1.0);
+                    float easeFactor = 1.0 - pow(1.0 - progress, 3.0);
+                    gpuDisplayHeight = aTargetScale * easeFactor * uHeightFactor;
+
+                    float turbulenceX = sin(aBasePosition.x * 0.2 + uPlantWavePhase * 3.0) * 0.06 * gpuDisplayHeight * uTurbulence;
+                    float turbulenceY = cos(aBasePosition.y * 0.2 + uPlantWavePhase * 3.5) * 0.06 * gpuDisplayHeight * uTurbulence;
+
+                    float wriggleX = 0.0;
+                    float wriggleY = 0.0;
+                    if (aTargetScale * uHeightFactor > 3.0) {
+                        float wriggleAmt = sin(easeFactor * 3.14159) * 0.25;
+                        wriggleX = sin(uNow * 0.006 + aBasePosition.x) * wriggleAmt;
+                        wriggleY = cos(uNow * 0.005 + aBasePosition.y) * wriggleAmt;
+                    }
+
+                    // 合并风力与鼠标交互带来的弯曲
+                    vec3 euler = aBaseEuler + vec3(aBend.x + turbulenceX + wriggleX, aBend.y + turbulenceY + wriggleY, 0.0);
+                    gpuRotation = rotZ(euler.z) * rotY(euler.y) * rotX(euler.x);
+
+                    vec3 transformedNormal = normalMatrix * (gpuRotation * objectNormal);
+                    #ifdef FLIP_SIDED
+                        transformedNormal = - transformedNormal;
+                    #endif
+                    #ifdef USE_TANGENT
+                        vec3 transformedTangent = normalMatrix * (gpuRotation * objectTangent);
+                        #ifdef FLIP_SIDED
+                            transformedTangent = - transformedTangent;
+                        #endif
+                    #endif
+                    `
+                );
+
+                shader.vertexShader = shader.vertexShader.replace(
+                    '#include <begin_vertex>',
+                    `
+                    vec3 transformed = vec3( position );
+                    vDisplayHeight = gpuDisplayHeight;
+                    vNoise = aNoise;
+                    vIllum = aIllumination;
+
+                    #if IS_TIP == 1
+                        float tipScale = min(1.0, gpuDisplayHeight * 3.0);
+                        transformed *= tipScale;
+                        transformed += vec3(0.0, 0.0, gpuDisplayHeight);
+                    #else
+                        transformed *= vec3(1.0, 1.0, gpuDisplayHeight);
+                    #endif
+
+                    transformed = gpuRotation * transformed;
+                    transformed += aBasePosition;
+
+                    vec3 baseColor = mix(uColorGrnd1, uColorGrnd2, vNoise);
+                    vec3 finalColor = baseColor;
+
+                    float h = gpuDisplayHeight / uHeightFactor;
+                    if (h < 1.5) {
+                        float shadow = (h < 0.8) ? (0.6 + h * 0.5) : 1.0;
+                        finalColor *= shadow;
+                    } else if (h < 3.5) {
+                        float t = (h - 1.5) / 2.0;
+                        float smoothT = t * t * (3.0 - 2.0 * t);
+                        finalColor = mix(baseColor, uColorEdge, smoothT);
+                    } else {
+                        float t = min(1.0, (h - 3.5) / 1.5);
+                        finalColor = mix(uColorEdge, uColorPeak, t);
+                        if (h > 5.0) {
+                            float w = min(1.0, (h - 5.0) * 0.15);
+                            finalColor = mix(finalColor, vec3(1.0), w);
+                        }
+                    }
+
+                    vec3 tipColorBase = (h < 1.5) ? min(vec3(1.0), finalColor * 1.1 + vec3(0.15)) : min(vec3(1.0), finalColor * 1.2);
+                    #if IS_TIP == 1
+                        finalColor = tipColorBase;
+                    #endif
+
+                    // 鼠标交互点亮效果
+                    if (vIllum > 0.0) {
+                        float illum = vIllum;
+                        #if IS_TIP == 0
+                            finalColor = mix(finalColor, uColorPeak, illum * 0.6);
+                        #else
+                            finalColor = mix(finalColor, vec3(1.0), illum);
+                        #endif
+                    }
+
+                    vColor = finalColor;
+                    `
+                );
+            };
+
+            const stalkMat = new THREE.MeshStandardMaterial(materialOpts);
+            stalkMat.onBeforeCompile = (shader) => onBeforeCompile(shader, false);
+
+            const tipMat = new THREE.MeshStandardMaterial(materialOpts);
+            tipMat.onBeforeCompile = (shader) => onBeforeCompile(shader, true);
+
+            stalkMesh = new THREE.InstancedMesh(stalkGeom, stalkMat, totalCount);
+            tipMesh = new THREE.InstancedMesh(tipGeom, tipMat, totalCount);
+
+            stalkMesh.castShadow = false; stalkMesh.receiveShadow = true;
+            tipMesh.castShadow = false; tipMesh.receiveShadow = true;
+            stalkMesh.frustumCulled = false;
+            tipMesh.frustumCulled = false;
+
+            const imgData = generateHeightMap();
+            let idx = 0;
+            const aspect = window.innerWidth / window.innerHeight;
+            let textRegionSize = 80;
+            if (aspect < 0.6) textRegionSize = 35;
+            else if (aspect < 0.9) textRegionSize = 55;
+
+            for (let r = 0; r < gridRows; r++) {
+                for (let c = 0; c < gridCols; c++) {
+                    const worldX = (c / gridCols - 0.5) * groundWidth;
+                    const worldY = -(r / gridRows - 0.5) * groundHeight;
+
+                    const canvasX = ((worldX / textRegionSize) + 0.5) * 1024;
+                    const canvasY = ((-worldY / textRegionSize) + 0.5) * 1024;
+
+                    let isVein = false;
+                    let haloIntensity = 0;
+
+                    if (canvasX >= 0 && canvasX < 1024 && canvasY >= 0 && canvasY < 1024) {
+                        const pixelIndex = (Math.floor(canvasY) * 1024 + Math.floor(canvasX)) * 4;
+                        isVein = imgData[pixelIndex] > 100;
+                        haloIntensity = imgData[pixelIndex + 2] / 255;
+                    }
+
+                    const dx = worldX;
+                    const dy = worldY;
+                    const distFromCenter = Math.sqrt(dx * dx + dy * dy);
+                    const baseDelay = distFromCenter * 4.0;
+                    const noise = Math.sin(worldX * 0.4) + Math.cos(worldY * 0.4) + Math.sin((worldX + worldY) * 0.25) + Math.random() * 0.6;
+
+                    for (let s = 0; s < stalksPerCell; s++) {
+                        if (idx >= totalCount) break;
+
+                        positions[idx * 3] = worldX + (Math.random() - 0.5) * 0.1;
+                        positions[idx * 3 + 1] = worldY + (Math.random() - 0.5) * 0.1;
+                        positions[idx * 3 + 2] = (Math.random() - 0.5) * 0.4;
+
+                        const angle = Math.random() * Math.PI * 2;
+                        const tilt = Math.random() * 0.55;
+                        baseEulers[idx * 3] = Math.sin(angle) * tilt;
+                        baseEulers[idx * 3 + 1] = Math.cos(angle) * tilt;
+                        baseEulers[idx * 3 + 2] = Math.random() * Math.PI;
+
+                        noiseValues[idx] = Math.max(0, Math.min(1, noise * 0.5 + 0.25));
+
+                        let targetHeight = 0;
+                        if (isVein) {
+                            targetHeight = 6.0 + Math.random() * 1.5;
+                        } else if (haloIntensity > 0.1) {
+                            const t = Math.pow(haloIntensity, 2.0);
+                            targetHeight = 0.5 + t * 5.0 + Math.random() * 0.5;
+                        } else if (haloIntensity > 0.01) {
+                            targetHeight = 0.05 + Math.random() * 0.05;
+                        } else {
+                            targetHeight = 0.2 + noiseValues[idx] * 0.3;
+                            if (Math.random() > 0.998) targetHeight += 0.8 + Math.random() * 0.8;
+                        }
+
+                        targetScales[idx] = targetHeight;
+                        delays[idx] = baseDelay + Math.random() * 1500;
+                        idx++;
+                    }
+                }
+            }
+
+            stalkMesh.geometry.setAttribute('aBasePosition', new THREE.InstancedBufferAttribute(positions, 3));
+            stalkMesh.geometry.setAttribute('aBaseEuler', new THREE.InstancedBufferAttribute(baseEulers, 3));
+            stalkMesh.geometry.setAttribute('aTargetScale', new THREE.InstancedBufferAttribute(targetScales, 1));
+            stalkMesh.geometry.setAttribute('aDelay', new THREE.InstancedBufferAttribute(delays, 1));
+            stalkMesh.geometry.setAttribute('aNoise', new THREE.InstancedBufferAttribute(noiseValues, 1));
+            stalkMesh.geometry.setAttribute('aBend', new THREE.InstancedBufferAttribute(bends, 2));
+            stalkMesh.geometry.setAttribute('aIllumination', new THREE.InstancedBufferAttribute(illumination, 1));
+
+            tipMesh.geometry.setAttribute('aBasePosition', new THREE.InstancedBufferAttribute(positions, 3));
+            tipMesh.geometry.setAttribute('aBaseEuler', new THREE.InstancedBufferAttribute(baseEulers, 3));
+            tipMesh.geometry.setAttribute('aTargetScale', new THREE.InstancedBufferAttribute(targetScales, 1));
+            tipMesh.geometry.setAttribute('aDelay', new THREE.InstancedBufferAttribute(delays, 1));
+            tipMesh.geometry.setAttribute('aNoise', new THREE.InstancedBufferAttribute(noiseValues, 1));
+            tipMesh.geometry.setAttribute('aBend', new THREE.InstancedBufferAttribute(bends, 2));
+            tipMesh.geometry.setAttribute('aIllumination', new THREE.InstancedBufferAttribute(illumination, 1));
+
+            // 初始化矩阵
+            const stalkMatArr = stalkMesh.instanceMatrix.array;
+            const tipMatArr = tipMesh.instanceMatrix.array;
+            for (let i = 0; i < totalCount; i++) {
+                const o = i * 16;
+                stalkMatArr[o] = 1; stalkMatArr[o + 5] = 1; stalkMatArr[o + 10] = 1; stalkMatArr[o + 15] = 1;
+                tipMatArr[o] = 1; tipMatArr[o + 5] = 1; tipMatArr[o + 10] = 1; tipMatArr[o + 15] = 1;
+            }
+
+            scene.add(stalkMesh);
+            scene.add(tipMesh);
+        }
+
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+
+            const now = performance.now();
+            const delta = now - lastFrameTime;
+            lastFrameTime = now;
+            const elapsed = now - startTime;
+
+            // 色彩平滑渐变
+            const lerpSpeed = 0.015;
+            colorGrnd1.lerp(targetColorGrnd1, lerpSpeed);
+            colorGrnd2.lerp(targetColorGrnd2, lerpSpeed);
+            colorEdge.lerp(targetColorEdge, lerpSpeed);
+            colorPeak.lerp(targetColorPeak, lerpSpeed);
+
+            if (mouseLight && interactiveDust) {
+                mouseLight.color.copy(colorPeak);
+                interactiveDust.material.color.copy(colorPeak);
+            }
+
+            // 基础风吹动画
+            plantWavePhase += delta * 0.0004;
+
+            // 更新 Shader Variables
+            shaderUniforms.uTime.value = elapsed;
+            shaderUniforms.uNow.value = now;
+            shaderUniforms.uPlantWavePhase.value = plantWavePhase;
+            shaderUniforms.uColorGrnd1.value.copy(colorGrnd1);
+            shaderUniforms.uColorGrnd2.value.copy(colorGrnd2);
+            shaderUniforms.uColorEdge.value.copy(colorEdge);
+            shaderUniforms.uColorPeak.value.copy(colorPeak);
+
+            let totalForce = 0;
+
+            // 鼠标视差与光线追踪
+            const targetCamX = (mouse.x === -1000 ? 0 : mouse.x) * 4;
+            const targetCamY = (mouse.y === -1000 ? 0 : mouse.y) * 4;
+            camera.position.x += (targetCamX - camera.position.x) * 0.02;
+            camera.position.y += (targetCamY - camera.position.y) * 0.02;
+            camera.lookAt(0, 0, 0);
+
+            const mouseSpeed = mouseWorld.distanceTo(lastMouseWorld);
+
+            // 场景缓慢自转
+            scene.rotation.x = Math.sin(now * 0.0003) * 0.05;
+            scene.rotation.y = Math.cos(now * 0.0002) * 0.05;
+
+            // 更新鼠标光源
+            if (mouseLight) {
+                mouseLight.position.x += (mouseWorld.x - mouseLight.position.x) * 0.15;
+                mouseLight.position.y += (mouseWorld.y - mouseLight.position.y) * 0.15;
+                mouseLight.position.z = 15;
+            }
+
+            // 背景浮尘动画
+            if (dustParticles) {
+                dustParticles.rotation.y += 0.0005;
+                dustParticles.rotation.x += 0.0002;
+                const pos = dustParticles.geometry.attributes.position.array;
+                for (let i = 1; i < pos.length; i += 3) {
+                    pos[i] += 0.02;
+                    if (pos[i] > 35) pos[i] = -35;
+                }
+                dustParticles.geometry.attributes.position.needsUpdate = true;
+            }
+
+            // 交互发光灰尘动画
+            let currentActiveDust = 0;
+            if (interactiveDust) {
+                const pos = interactiveDust.geometry.attributes.position.array;
+                let needsDustUpdate = false;
+                for (let i = 0; i < maxInteractiveDust; i++) {
+                    if (activeDustLifetimes[i] > 0) {
+                        pos[i * 3] += activeDustVelocities[i * 3];
+                        pos[i * 3 + 1] += activeDustVelocities[i * 3 + 1];
+                        pos[i * 3 + 2] += activeDustVelocities[i * 3 + 2];
+                        activeDustLifetimes[i] -= delta * 0.001;
+
+                        currentActiveDust++;
+
+                        activeDustVelocities[i * 3] *= 0.95;
+                        activeDustVelocities[i * 3 + 1] *= 0.95;
+                        activeDustVelocities[i * 3 + 2] *= 0.98;
+
+                        if (activeDustLifetimes[i] <= 0) {
+                            pos[i * 3] = 9999;
+                        }
+                        needsDustUpdate = true;
+                    }
+                }
+                if (needsDustUpdate) interactiveDust.geometry.attributes.position.needsUpdate = true;
+            }
+
+            // --- 核心物理计算还原 ---
+            const interactionRadius = 8.5;
+            const interactionRadSq = interactionRadius * interactionRadius;
+
+            let needsBendUpdate = false;
+            let needsIllumUpdate = false;
+
+            // 阶段1: 衰减弯曲和高亮
+            if (hasActiveBends || hasActiveIllum) {
+                let anyBendActive = false;
+                let anyIllumActive = false;
+                for (let i = 0; i < totalCount; i++) {
+                    if (hasActiveBends) {
+                        const bx = bends[i * 2];
+                        const by = bends[i * 2 + 1];
+                        if (bx !== 0 || by !== 0) {
+                            bends[i * 2] = Math.abs(bx) < 0.001 ? 0 : bx * 0.85;
+                            bends[i * 2 + 1] = Math.abs(by) < 0.001 ? 0 : by * 0.85;
+                            needsBendUpdate = true;
+                            anyBendActive = true;
+                        }
+                    }
+                    if (hasActiveIllum) {
+                        if (illumination[i] > 0) {
+                            illumination[i] -= 0.015;
+                            if (illumination[i] <= 0) illumination[i] = 0;
+                            needsIllumUpdate = true;
+                            anyIllumActive = true;
+                        }
+                    }
+                }
+                hasActiveBends = anyBendActive;
+                hasActiveIllum = anyIllumActive;
+            }
+
+            // 阶段2: 鼠标碰撞计算
+            const cellWidth = groundWidth / gridCols;
+            const cellHeight = groundHeight / gridRows;
+            const mouseCellC = (mouseWorld.x / groundWidth + 0.5) * gridCols;
+            const mouseCellR = (-mouseWorld.y / groundHeight + 0.5) * gridRows;
+
+            const cellRadiusC = Math.ceil(interactionRadius / cellWidth) + 1;
+            const cellRadiusR = Math.ceil(interactionRadius / cellHeight) + 1;
+
+            const minR = Math.max(0, Math.floor(mouseCellR - cellRadiusR));
+            const maxR = Math.min(gridRows - 1, Math.ceil(mouseCellR + cellRadiusR));
+            const minC = Math.max(0, Math.floor(mouseCellC - cellRadiusC));
+            const maxC = Math.min(gridCols - 1, Math.ceil(mouseCellC + cellRadiusC));
+
+            let weightedAvgX = 0, weightedAvgY = 0, totalWeight = 0;
+
+            for (let r = minR; r <= maxR; r++) {
+                for (let c = minC; c <= maxC; c++) {
+                    const cellBaseIdx = (r * gridCols + c) * stalksPerCell;
+                    for (let s = 0; s < stalksPerCell; s++) {
+                        const i = cellBaseIdx + s;
+                        if (i >= totalCount) break;
+
+                        const px = positions[i * 3];
+                        const py = positions[i * 3 + 1];
+
+                        const dx = px - mouseWorld.x;
+                        const dy = py - mouseWorld.y;
+                        const distSq = dx * dx + dy * dy;
+                        if (distSq >= interactionRadSq) continue;
+
+                        const dist = Math.sqrt(distSq);
+                        const force = Math.pow((interactionRadius - dist) / interactionRadius, 2);
+                        const targetBendX = (dy / dist) * force * 1.2;
+                        const targetBendY = -(dx / dist) * force * 1.2;
+
+                        bends[i * 2] += targetBendX * 0.15;
+                        bends[i * 2 + 1] += targetBendY * 0.15;
+                        needsBendUpdate = true;
+                        hasActiveBends = true;
+
+                        const progress = Math.min(1, Math.max(0, (elapsed - delays[i]) / 2000));
+                        const easeFactor = 1 - Math.pow(1 - progress, 3);
+                        const displayHeight = targetScales[i] * easeFactor * HEIGHT_FACTOR;
+
+                        if (displayHeight > 0.1) {
+                            const heightWeight = Math.pow(displayHeight, 2.5);
+                            const weightedForce = force * heightWeight;
+
+                            totalForce += weightedForce;
+                            weightedAvgX += px * weightedForce;
+                            weightedAvgY += py * weightedForce;
+                            totalWeight += weightedForce;
+
+                            if (displayHeight > 0.5) {
+                                illumination[i] = Math.min(1.0, illumination[i] + force * 1.5);
+                                needsIllumUpdate = true;
+                                hasActiveIllum = true;
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (needsBendUpdate && stalkMesh) stalkMesh.geometry.attributes.aBend.needsUpdate = true;
+            if (needsIllumUpdate && stalkMesh) stalkMesh.geometry.attributes.aIllumination.needsUpdate = true;
+
+            // 基于物理接触力度动态改变光源和生成互动粒子
+            if (mouseLight) {
+                const targetIntensity = 3.5 + (Math.min(1.0, totalForce / 400.0) * 8.0);
+                mouseLight.intensity += (targetIntensity - mouseLight.intensity) * 0.1;
+            }
+
+            const normalizedTotalForce = Math.min(1.0, totalForce / 350.0);
+            let brushIntensity = Math.min(mouseSpeed * normalizedTotalForce * 400, isMobile ? 8 : 15);
+
+            if (brushIntensity > 0.05 && totalWeight > 0) {
+                const avgX = weightedAvgX / totalWeight;
+                const avgY = weightedAvgY / totalWeight;
+                let dustToSpawn = Math.min(60, Math.floor(brushIntensity * 2.5));
+
+                if (dustToSpawn > 0) {
+                    for (let d = 0; d < dustToSpawn; d++) {
+                        let idx = activeDustIndex % maxInteractiveDust;
+                        activeDustPositions[idx * 3] = (avgX) + (Math.random() - 0.5) * 4.0;
+                        activeDustPositions[idx * 3 + 1] = (avgY) + (Math.random() - 0.5) * 4.0;
+                        activeDustPositions[idx * 3 + 2] = 5 + Math.random() * 4;
+
+                        activeDustVelocities[idx * 3] = (mouseWorld.x - lastMouseWorld.x) * 1.5 + (Math.random() - 0.5) * 2.5;
+                        activeDustVelocities[idx * 3 + 1] = (mouseWorld.y - lastMouseWorld.y) * 1.5 + (Math.random() - 0.5) * 2.5;
+                        activeDustVelocities[idx * 3 + 2] = Math.random() * 0.8 + 0.4;
+
+                        activeDustLifetimes[idx] = 1.0 + Math.random() * 1.2;
+                        activeDustIndex++;
+                    }
+                    interactiveDust.geometry.attributes.position.needsUpdate = true;
+                }
+            }
+
+            lastMouseWorld.copy(mouseWorld);
+            renderer.render(scene, camera);
+        }
+
+        // 页面打开立即执行
+        init();
+
+        // Click to Enter navigation
+        const prompt = document.getElementById('click-prompt');
+        const loading = document.getElementById('loading-indicator');
+
+        function createRipple(e) {
+            const ripple = document.createElement('div');
+            ripple.className = 'ripple';
+            const size = 30;
+            ripple.style.width = ripple.style.height = size + 'px';
+            ripple.style.left = (e.clientX - size / 2) + 'px';
+            ripple.style.top = (e.clientY - size / 2) + 'px';
+            document.body.appendChild(ripple);
+            setTimeout(() => ripple.remove(), 600);
+        }
+
+        document.addEventListener('click', function(e) {
+            if (prompt && !prompt.classList.contains('hidden')) {
+                createRipple(e);
+                prompt.classList.add('hidden');
+                if (loading) loading.style.display = 'block';
+                setTimeout(() => { window.location.href = '/index.html'; }, 300);
+            }
+        });
+    </script>
+</body>
+</html>

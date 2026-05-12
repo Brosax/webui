@@ -152,11 +152,24 @@ def _ensure_session_workspace_allowed(handler, session, *, write: bool = False):
 
 
 def _active_skills_dir() -> Path:
-    """Return the shared enterprise skills directory."""
+    """Return the skills directory for the current mode.
+
+    Multi-user mode: shared enterprise skills directory (get_shared_skills_dir).
+    Legacy/single-user/profile mode: profile-scoped skills directory under
+    the active Hermes home.
+    """
     try:
-        return get_shared_skills_dir()
+        if is_multi_user_mode():
+            return get_shared_skills_dir()
     except Exception:
-        return (Path(os.getenv("HERMES_SHARED_SKILLS_DIR", "")).expanduser() if os.getenv("HERMES_SHARED_SKILLS_DIR", "").strip() else (STATE_DIR / "shared_skills")).resolve()
+        pass
+    # Legacy/single-user/profile mode: use the active profile's skills dir
+    try:
+        from api.profiles import get_active_hermes_home
+        home = get_active_hermes_home()
+        return (home / "skills").resolve()
+    except Exception:
+        return (STATE_DIR / "shared_skills").resolve()
 
 
 def _skill_path_within(base_dir: Path, candidate: Path) -> bool:
@@ -819,6 +832,7 @@ from api.config import (
     CANCEL_FLAGS,
     SERVER_START_TIME,
     _resolve_cli_toolsets,
+    REPO_ROOT,
     _INDEX_HTML_PATH,
     get_available_models,
     IMAGE_EXTS,
@@ -2923,7 +2937,12 @@ def handle_get(handler, parsed) -> bool:
             version_token = quote(WEBUI_VERSION, safe="")
             from api.extensions import inject_extension_tags
 
-            html = _INDEX_HTML_PATH.read_text(encoding="utf-8").replace("__WEBUI_VERSION__", version_token)
+            # Serve splash screen for root path "/" only; main app for /session/ and /index.html
+            if parsed.path == "/":
+                _html_path = REPO_ROOT / "static" / "splash.html"
+            else:
+                _html_path = _INDEX_HTML_PATH
+            html = _html_path.read_text(encoding="utf-8").replace("__WEBUI_VERSION__", version_token)
             return t(
                 handler,
                 inject_extension_tags(html),
@@ -3012,6 +3031,7 @@ def handle_get(handler, parsed) -> bool:
                 "auth_enabled": is_auth_enabled(),
                 "logged_in": logged_in,
                 "setup_required": setup_required,
+                "multi_user": is_multi_user_mode(),
                 "user": user_payload,
             },
         )
@@ -4268,6 +4288,10 @@ def handle_post(handler, parsed) -> bool:
             body.get("model"),
             body.get("model_provider"),
         )
+        current_user = _current_user(handler)
+        current_profile = str(
+            (current_user.get("profile_name") if current_user else "") or ""
+        ).strip() or None
         # Use the profile sent by the client tab (if any) so that two tabs on
         # different profiles never clobber each other via the process-level global.
         # In multi-user mode, profile is server-bound to current_user.profile_name.
@@ -4275,7 +4299,7 @@ def handle_post(handler, parsed) -> bool:
             workspace=workspace,
             model=model,
             model_provider=model_provider,
-            profile=None if is_multi_user_mode() else (body.get("profile") or None),
+            profile=(current_profile if is_multi_user_mode() else (body.get("profile") or None)),
             project_id=body.get("project_id") or None,
             worktree_info=worktree_info,
         )
@@ -4420,6 +4444,68 @@ def handle_post(handler, parsed) -> bool:
         _routes.Session = _models.Session
         _routes.compact = _models.compact
         return j(handler, {"status": "ok", "reloaded": "api.models"})
+
+    # ── Admin: Shared Workspaces ──────────────────────────────────────────────
+    if parsed.path == "/api/admin/shared-workspaces":
+        scope_err = _require_scope(handler, "admin")
+        if scope_err:
+            return scope_err
+        perm_err = _require_admin(handler)
+        if perm_err:
+            return perm_err
+
+        if handler.command == "GET":
+            from api.users import get_shared_workspace_rules
+            rules = get_shared_workspace_rules()
+            return j(handler, {"workspaces": rules})
+
+        if handler.command == "POST":
+            # Add new shared workspace
+            from api.users import upsert_shared_workspace_rule
+            try:
+                require(body, "path")
+            except ValueError as e:
+                return bad(handler, str(e), 400)
+            try:
+                rule = upsert_shared_workspace_rule(
+                    path=str(body["path"]),
+                    name=body.get("name"),
+                    mode=str(body.get("mode", "read_write")),
+                )
+                return j(handler, {"ok": True, "workspace": rule}, status=201)
+            except (ValueError, Exception) as e:
+                return bad(handler, str(e), 400)
+
+        if handler.command == "PATCH":
+            # Update existing shared workspace
+            from api.users import upsert_shared_workspace_rule
+            try:
+                require(body, "path")
+            except ValueError as e:
+                return bad(handler, str(e), 400)
+            try:
+                rule = upsert_shared_workspace_rule(
+                    path=str(body["path"]),
+                    name=body.get("name"),
+                    mode=str(body.get("mode", "read_write")),
+                )
+                return j(handler, {"ok": True, "workspace": rule})
+            except (ValueError, Exception) as e:
+                return bad(handler, str(e), 400)
+
+        if handler.command == "DELETE":
+            # Remove shared workspace
+            from api.users import remove_shared_workspace_rule
+            try:
+                require(body, "path")
+            except ValueError as e:
+                return bad(handler, str(e), 400)
+            removed = remove_shared_workspace_rule(str(body["path"]))
+            if removed:
+                return j(handler, {"ok": True})
+            return bad(handler, "shared workspace not found", 404)
+
+        return bad(handler, "method not allowed", 405)
 
     if parsed.path == "/api/sessions/cleanup":
         return _handle_sessions_cleanup(handler, body, zero_only=False)

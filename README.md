@@ -333,6 +333,91 @@ for an app-like experience.
 
 ---
 
+## LAN Multi-User Server
+
+Hermes WebUI supports a multi-user server mode for LAN environments. An
+administrator creates and manages accounts, configures shared workspaces, and
+maintains shared skills. Each user gets private chat sessions, memory, profile
+context, and a personal workspace.
+
+### Starting the LAN server
+
+Bind to all interfaces so other machines on the network can connect:
+
+```bash
+HERMES_WEBUI_HOST=0.0.0.0 ./ctl.sh start
+```
+
+Or with `start.sh`:
+
+```bash
+HERMES_WEBUI_HOST=0.0.0.0 ./start.sh --no-browser
+```
+
+The server prints the bound address and port on startup (default `8787`).
+Other users on the LAN can open `http://<server-ip>:8787` in their browsers.
+
+### First-run admin setup
+
+When no users exist and no legacy password is set, the first visitor is
+redirected to `/setup-admin`. Create the initial admin account there — this
+also creates the admin's bound Hermes profile and personal workspace.
+
+After the admin account is created, normal multi-user authentication is active.
+All subsequent visitors see a login page.
+
+### Managing users
+
+Log in as admin and open **Settings > Users**. From there you can:
+
+- Create new user accounts (username, display name, password, role)
+- Edit user roles (admin / user) and status (active / disabled)
+- Reset user passwords
+
+Each user gets a unique Hermes profile and an isolated personal workspace at
+`STATE_DIR/users/<username>/workspace`. Users cannot see each other's chat
+history, memory, or projects.
+
+### Shared workspaces
+
+Admins can configure shared workspaces in **Settings > Users** under the
+"Shared Workspaces" section. Each shared workspace has:
+
+- **Path** — an absolute filesystem path on the server
+- **Name** — an optional display name
+- **Mode** — `read_write` (full access) or `read_only` (browse and read only)
+
+All active users see the same shared workspace list. Personal workspaces
+remain private per user.
+
+### Shared skills
+
+All users can browse and use shared skills. Only admins can create, update, or
+delete shared skills. The shared skills directory defaults to
+`STATE_DIR/shared_skills` or the path set in `HERMES_SHARED_SKILLS_DIR`.
+
+### Provider and API key configuration
+
+Provider configuration and API keys are server-level shared settings. The
+admin configures model/provider access once, and all users share that model
+capability. Per-user provider configuration is not supported in the first
+version.
+
+### Limitations
+
+- Per-user or per-role workspace ACLs are not yet supported.
+- Admins cannot browse other users' chat history or memory.
+- SSO, LDAP, OIDC, and reverse-proxy identity integration are deferred.
+- Real-time collaborative editing is not supported.
+- **Full runtime isolation is not yet achieved**: Concurrent agent runs may cross-contaminate workspace or profile context because Hermes Agent reads process-global environment variables (`TERMINAL_CWD`, `HERMES_HOME`, `HERMES_SESSION_KEY`) during tool execution. The WebUI uses a narrow lock window for environment setup, but tool execution happens outside this window. This limitation requires upstream changes to Hermes Agent to accept per-run context instead of reading `os.environ` directly.
+
+> **Note:** Docker remains supported for multi-user mode. Set
+> `HERMES_WEBUI_HOST=0.0.0.0` in your `docker-compose.yml` environment
+> (already the default). The first-run admin setup flow works the same way
+> inside a container.
+
+---
+
 ## Manual launch (without start.sh)
 
 If you prefer to launch the server directly:

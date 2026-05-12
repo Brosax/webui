@@ -12,7 +12,7 @@ import sqlite3
 import time
 from pathlib import Path
 
-from api.config import STATE_DIR, load_settings
+from api.config import STATE_DIR, load_settings, save_settings
 
 logger = logging.getLogger(__name__)
 
@@ -651,8 +651,91 @@ def get_shared_workspace_rules() -> list[dict]:
             resolved = str(Path(path).expanduser().resolve())
         except Exception:
             continue
-        rules.append({"path": resolved, "mode": mode})
+        name = str(entry.get("name") or "").strip() or Path(resolved).name
+        rules.append({"path": resolved, "name": name, "mode": mode})
     return rules
+
+
+def upsert_shared_workspace_rule(path: str, name: str | None = None, mode: str = "read_write") -> dict:
+    """Add or update a shared workspace rule. Returns the updated rule."""
+    if mode not in {"read_only", "read_write"}:
+        mode = "read_write"
+    try:
+        resolved = str(Path(path).expanduser().resolve())
+    except Exception as e:
+        raise ValueError(f"Invalid path: {path}") from e
+
+    settings = load_settings()
+    raw = settings.get("shared_workspaces", [])
+    if not isinstance(raw, list):
+        raw = []
+
+    # Normalize mode
+    mode = str(mode).strip().lower()
+    if mode not in {"read_only", "read_write"}:
+        mode = "read_write"
+
+    # Find existing entry by resolved path
+    updated = False
+    for entry in raw:
+        if isinstance(entry, dict) and str(entry.get("path") or "").strip():
+            try:
+                existing_resolved = str(Path(entry["path"]).expanduser().resolve())
+            except Exception:
+                continue
+            if existing_resolved == resolved:
+                entry["name"] = name if name else entry.get("name") or Path(resolved).name
+                entry["mode"] = mode
+                updated = True
+                break
+
+    if not updated:
+        display_name = name if name else Path(resolved).name
+        raw.append({"path": resolved, "name": display_name, "mode": mode})
+
+    settings["shared_workspaces"] = raw
+    save_settings(settings)
+
+    # Return the actual persisted rule (name may have been kept from existing entry)
+    for entry in raw:
+        if isinstance(entry, dict) and str(entry.get("path") or "").strip():
+            try:
+                if str(Path(entry["path"]).expanduser().resolve()) == resolved:
+                    return {"path": resolved, "name": entry.get("name", ""), "mode": entry.get("mode", "read_write")}
+            except Exception:
+                continue
+    return {"path": resolved, "name": name if name else Path(resolved).name, "mode": mode}
+
+
+def remove_shared_workspace_rule(path: str) -> bool:
+    """Remove a shared workspace rule by resolved path. Returns True if removed."""
+    try:
+        resolved = str(Path(path).expanduser().resolve())
+    except Exception:
+        return False
+
+    settings = load_settings()
+    raw = settings.get("shared_workspaces", [])
+    if not isinstance(raw, list):
+        return False
+
+    original_len = len(raw)
+    raw = [
+        entry
+        for entry in raw
+        if not (
+            isinstance(entry, dict)
+            and str(entry.get("path") or "").strip()
+            and str(Path(entry["path"]).expanduser().resolve()) == resolved
+        )
+    ]
+
+    if len(raw) == original_len:
+        return False
+
+    settings["shared_workspaces"] = raw
+    save_settings(settings)
+    return True
 
 
 def _path_is_within(candidate: Path, root: Path) -> bool:

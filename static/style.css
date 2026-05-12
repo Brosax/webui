@@ -3789,6 +3789,18 @@ main.main.showing-logs > #mainLogs{display:flex;}
 .users-token-banner{display:flex;align-items:center;gap:8px;padding:10px 14px;border:1px solid rgba(61,139,64,.3);border-radius:8px;background:rgba(61,139,64,.08);margin-bottom:12px;flex-wrap:wrap;}
 .users-token-value{font-size:12px;padding:4px 8px;background:var(--code-bg);border:1px solid var(--border);border-radius:6px;word-break:break-all;user-select:all;flex:1;min-width:200px;}
 
+/* ── Shared Workspaces (admin, multi-user mode) ── */
+.shared-ws-row{border:1px solid var(--border);border-radius:8px;margin-bottom:6px;background:var(--sidebar);overflow:hidden;}
+.shared-ws-row-main{display:flex;align-items:center;gap:12px;padding:10px 14px;flex-wrap:wrap;}
+.shared-ws-row-info{flex:1;min-width:120px;}
+.shared-ws-row-name{font-size:13px;font-weight:500;color:var(--text);}
+.shared-ws-row-path{font-size:11px;color:var(--muted);margin-left:6px;font-family:'SF Mono',ui-monospace,monospace;}
+.shared-ws-badge{display:inline-block;padding:2px 8px;border-radius:10px;font-size:11px;font-weight:500;border:1px solid var(--border);flex-shrink:0;}
+.shared-ws-mode-rw{color:var(--success);border-color:rgba(61,139,64,.3);background:rgba(61,139,64,.08);}
+.shared-ws-mode-ro{color:var(--muted);border-color:var(--border);background:var(--surface);}
+.shared-ws-row-actions{display:flex;gap:4px;flex-shrink:0;margin-left:auto;}
+.shared-ws-row-edit{padding:12px 14px;border-top:1px solid var(--border);background:var(--surface-subtle);}
+
 @media(max-width:640px){
   .users-row-main{flex-direction:column;align-items:flex-start;gap:6px;}
   .users-row-actions{margin-left:0;width:100%;justify-content:flex-end;}
@@ -3797,4 +3809,6 @@ main.main.showing-logs > #mainLogs{display:flex;}
   .users-toolbar .users-search{min-width:auto;}
   .users-stats-row{gap:8px;}
   .users-stat{flex:1;min-width:50px;padding:8px 10px;}
+  .shared-ws-row-main{flex-direction:column;align-items:flex-start;gap:6px;}
+  .shared-ws-row-actions{margin-left:0;width:100%;justify-content:flex-end;}
 }

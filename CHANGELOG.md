@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Known Limitations
+
+- **Multi-user runtime isolation is not fully achieved**: Concurrent agent runs may cross-contaminate workspace or profile context because Hermes Agent reads process-global environment variables (`TERMINAL_CWD`, `HERMES_HOME`, `HERMES_SESSION_KEY`) during tool execution. The WebUI uses a narrow lock window for environment setup, but tool execution happens outside this window. This limitation requires upstream changes to Hermes Agent to accept per-run context instead of reading `os.environ` directly. See `docs/superpowers/reports/2026-05-12-integration-summary.md` for details.
+
 ## [v0.51.44] — 2026-05-11 — Release T (5-PR contributor batch — security + worktree sessions + LM Studio + onboarding docs + transcript dedup, plus comprehensive test-suite network isolation)
 
 ### Added

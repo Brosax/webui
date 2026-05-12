@@ -882,6 +882,23 @@ def _request_user_profile_name() -> str | None:
     return profile or None
 
 
+def _request_user_log_context() -> dict:
+    try:
+        from api.auth import get_current_request_path, get_current_user
+
+        user = get_current_user()
+        route = get_current_request_path()
+    except Exception:
+        user = None
+        route = ""
+    user = user if isinstance(user, dict) else {}
+    return {
+        "route": route or "",
+        "username": str(user.get("username") or ""),
+        "profile": str(user.get("profile_name") or ""),
+    }
+
+
 def _session_visible_to_request_user(session: Session) -> bool:
     """Check request-scoped access to a session.
 
@@ -900,6 +917,58 @@ def _session_visible_to_request_user(session: Session) -> bool:
         return False
 
 
+def _log_session_ownership_reload(
+    sid,
+    *,
+    cached_session=None,
+    disk_session=None,
+    file_exists=False,
+    returned=False,
+):
+    if not cached_session:
+        return
+    ctx = _request_user_log_context()
+    log = logger.warning if returned else logger.debug
+    log(
+        "session ownership cache reload: route=%s session_id=%s username=%s "
+        "request_profile=%s cached_profile=%s disk_profile=%s file_exists=%s returned=%s",
+        ctx["route"] or "?",
+        sid,
+        ctx["username"] or "?",
+        ctx["profile"] or "?",
+        getattr(cached_session, "profile", None),
+        getattr(disk_session, "profile", None) if disk_session else None,
+        bool(file_exists),
+        bool(returned),
+    )
+
+
+def _cache_full_session(sid, session):
+    with LOCK:
+        SESSIONS[sid] = session
+        SESSIONS.move_to_end(sid)
+        while len(SESSIONS) > SESSIONS_MAX:
+            SESSIONS.popitem(last=False)  # evict least recently used
+
+
+def _repair_loaded_full_session_if_needed(sid, session):
+    try:
+        repaired = _repair_stale_pending(session)
+        # If repair had to bail because the per-session lock was held,
+        # do not pin the still-stale sidecar in the LRU cache forever.
+        # Leaving it cached would prevent future get_session() calls from
+        # re-entering the cache-miss repair path after the lock holder exits.
+        if not repaired and (len(session.messages) == 0
+                and session.pending_user_message
+                and session.active_stream_id
+                and session.active_stream_id not in _active_stream_ids()):
+            with LOCK:
+                if SESSIONS.get(sid) is session:
+                    SESSIONS.pop(sid, None)
+    except Exception:
+        pass  # repair is best-effort
+
+
 def get_session(sid, metadata_only=False):
     """Load a session, optionally with metadata only (skipping the messages array).
 
@@ -908,12 +977,38 @@ def get_session(sid, metadata_only=False):
     messages list. Use this when you only need compact() metadata and not the
     actual message history (e.g., for fast sidebar switching).
     """
+    cached = None
     with LOCK:
-        if sid in SESSIONS:
-            if not _session_visible_to_request_user(SESSIONS[sid]):
-                raise KeyError(sid)
-            SESSIONS.move_to_end(sid)  # LRU: mark as recently used
-            return SESSIONS[sid]
+        cached = SESSIONS.get(sid)
+        if cached is not None:
+            if _session_visible_to_request_user(cached):
+                SESSIONS.move_to_end(sid)  # LRU: mark as recently used
+                return cached
+    if cached is not None:
+        # The in-memory object may have stale profile metadata from an earlier
+        # request. Re-read disk before deciding this is a cross-user 404.
+        p = SESSION_DIR / f'{sid}.json'
+        s = Session.load_metadata_only(sid) if metadata_only else Session.load(sid)
+        if s and _session_visible_to_request_user(s):
+            _log_session_ownership_reload(
+                sid,
+                cached_session=cached,
+                disk_session=s,
+                file_exists=p.exists(),
+                returned=True,
+            )
+            if not metadata_only:
+                _cache_full_session(sid, s)
+                _repair_loaded_full_session_if_needed(sid, s)
+            return s
+        _log_session_ownership_reload(
+            sid,
+            cached_session=cached,
+            disk_session=s,
+            file_exists=p.exists(),
+            returned=False,
+        )
+        raise KeyError(sid)
     if metadata_only:
         s = Session.load_metadata_only(sid)
         if s:
@@ -925,27 +1020,9 @@ def get_session(sid, metadata_only=False):
     if s:
         if not _session_visible_to_request_user(s):
             raise KeyError(sid)
-        with LOCK:
-            SESSIONS[sid] = s
-            SESSIONS.move_to_end(sid)
-            while len(SESSIONS) > SESSIONS_MAX:
-                SESSIONS.popitem(last=False)  # evict least recently used
+        _cache_full_session(sid, s)
         if not metadata_only:
-            try:
-                repaired = _repair_stale_pending(s)
-                # If repair had to bail because the per-session lock was held,
-                # do not pin the still-stale sidecar in the LRU cache forever.
-                # Leaving it cached would prevent future get_session() calls from
-                # re-entering the cache-miss repair path after the lock holder exits.
-                if not repaired and (len(s.messages) == 0
-                        and s.pending_user_message
-                        and s.active_stream_id
-                        and s.active_stream_id not in _active_stream_ids()):
-                    with LOCK:
-                        if SESSIONS.get(sid) is s:
-                            SESSIONS.pop(sid, None)
-            except Exception:
-                pass  # repair is best-effort
+            _repair_loaded_full_session_if_needed(sid, s)
         return s
     raise KeyError(sid)
 

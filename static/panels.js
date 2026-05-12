@@ -6335,16 +6335,22 @@ async function loadUsersPanel(){
       selfView.style.display='none';
       legacyView.style.display='block';
       if(tokensSection) tokensSection.style.display='none';
+      const sharedWsSection=$('sharedWorkspacesSection');
+      if(sharedWsSection) sharedWsSection.style.display='none';
       return;
     }
     _authMode='multi';
     legacyView.style.display='none';
+    const sharedWsSection=$('sharedWorkspacesSection');
     if(isAdmin){
       adminView.style.display='block';
       selfView.style.display='none';
       if(tokensSection) tokensSection.style.display='block';
+      if(sharedWsSection) sharedWsSection.style.display='block';
       await _loadUsersDirectory();
+      await _loadSharedWorkspaces();
     }else{
+      if(sharedWsSection) sharedWsSection.style.display='none';
       adminView.style.display='none';
       selfView.style.display='block';
       if(tokensSection) tokensSection.style.display='block';
@@ -6686,5 +6692,148 @@ async function revokeToken(tid,name){
     await _loadTokens();
   }catch(e){
     showToast('Revoke failed: '+e.message,'error');
+  }
+}
+
+// ── Shared Workspaces (admin-only, multi-user mode) ─────────────────────────
+
+let _sharedWorkspacesCache=[];
+let _editingSharedWsPath=null;
+
+async function _loadSharedWorkspaces(){
+  try{
+    const data=await api('/api/admin/shared-workspaces');
+    _sharedWorkspacesCache=Array.isArray(data.workspaces)?data.workspaces:[];
+    _renderSharedWorkspacesList(_sharedWorkspacesCache);
+  }catch(e){
+    showToast('Failed to load shared workspaces: '+e.message,'error');
+  }
+}
+
+function _renderSharedWorkspacesList(workspaces){
+  const list=$('sharedWorkspacesList');
+  const empty=$('sharedWorkspacesEmpty');
+  if(!list) return;
+  if(!workspaces.length){
+    list.innerHTML='';
+    if(empty) empty.style.display='block';
+    return;
+  }
+  if(empty) empty.style.display='none';
+  let html='';
+  for(const ws of workspaces){
+    const modeLabel=ws.mode==='read_only'?'Read Only':'Read & Write';
+    const modeClass=ws.mode==='read_only'?'shared-ws-mode-ro':'shared-ws-mode-rw';
+    const displayName=ws.name?esc(ws.name):esc(ws.path);
+    html+=`<div class="shared-ws-row" data-ws-path="${esc(ws.path)}" data-ws-name="${esc(ws.name||'')}" data-ws-mode="${esc(ws.mode||'')}">
+      <div class="shared-ws-row-main">
+        <div class="shared-ws-row-info">
+          <span class="shared-ws-row-name">${displayName}</span>
+          ${ws.name?`<span class="shared-ws-row-path">${esc(ws.path)}</span>`:''}
+        </div>
+        <span class="shared-ws-badge ${modeClass}">${esc(modeLabel)}</span>
+        <div class="shared-ws-row-actions">
+          <button class="users-action-btn shared-ws-edit-btn" title="Edit" data-action="edit"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/></svg></button>
+          <button class="users-action-btn users-action-danger shared-ws-delete-btn" title="Remove" data-action="delete"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/></svg></button>
+        </div>
+      </div>
+      <div class="shared-ws-row-edit" style="display:none"></div>
+    </div>`;
+  }
+  list.innerHTML=html;
+}
+
+// Event delegation for shared workspace actions — avoids inline onclick with raw paths
+(function(){
+  const list=$('sharedWorkspacesList');
+  if(!list) return;
+  list.addEventListener('click',function(e){
+    const btn=e.target.closest('[data-action]');
+    if(!btn) return;
+    const row=btn.closest('.shared-ws-row');
+    if(!row) return;
+    const path=row.dataset.wsPath;
+    const action=btn.dataset.action;
+    if(action==='edit') _editSharedWorkspace(path);
+    else if(action==='delete') _deleteSharedWorkspace(path);
+  });
+})();
+
+function showAddSharedWorkspaceForm(){
+  const form=$('sharedWorkspaceForm');
+  if(form) form.style.display='block';
+  _editingSharedWsPath=null;
+  const submitBtn=$('btnSubmitSharedWorkspace');
+  if(submitBtn) submitBtn.textContent='Add Workspace';
+  const path=$('sharedWsPath');if(path){path.value='';path.readOnly=false;}
+  const name=$('sharedWsName');if(name) name.value='';
+  const mode=$('sharedWsMode');if(mode) mode.value='read_write';
+  const err=$('sharedWsFormError');if(err) err.style.display='none';
+  if(path) path.focus();
+}
+
+function hideSharedWorkspaceForm(){
+  const form=$('sharedWorkspaceForm');
+  if(form) form.style.display='none';
+  _editingSharedWsPath=null;
+  ['sharedWsPath','sharedWsName'].forEach(id=>{const el=$(id);if(el) el.value='';});
+  const mode=$('sharedWsMode');if(mode) mode.value='read_write';
+  const err=$('sharedWsFormError');if(err) err.style.display='none';
+}
+
+function _editSharedWorkspace(path){
+  const ws=_sharedWorkspacesCache.find(w=>w.path===path);
+  if(!ws) return;
+  _editingSharedWsPath=path;
+  const form=$('sharedWorkspaceForm');
+  if(form) form.style.display='block';
+  const submitBtn=$('btnSubmitSharedWorkspace');
+  if(submitBtn) submitBtn.textContent='Save Changes';
+  const pathEl=$('sharedWsPath');if(pathEl){pathEl.value=ws.path;pathEl.readOnly=true;}
+  const nameEl=$('sharedWsName');if(nameEl) nameEl.value=ws.name||'';
+  const modeEl=$('sharedWsMode');if(modeEl) modeEl.value=ws.mode;
+  const err=$('sharedWsFormError');if(err) err.style.display='none';
+  if(nameEl) nameEl.focus();
+}
+
+async function submitSharedWorkspace(){
+  const pathVal=($('sharedWsPath')||{}).value||'';
+  const nameVal=($('sharedWsName')||{}).value||'';
+  const modeVal=($('sharedWsMode')||{}).value||'read_write';
+  const errEl=$('sharedWsFormError');
+  if(!pathVal.trim()){
+    if(errEl){errEl.textContent='Path is required.';errEl.style.display='';}
+    return;
+  }
+  if(errEl) errEl.style.display='none';
+  try{
+    const body={path:pathVal.trim(),mode:modeVal};
+    if(nameVal.trim()) body.name=nameVal.trim();
+    if(_editingSharedWsPath){
+      await api('/api/admin/shared-workspaces',{method:'PATCH',body:JSON.stringify(body)});
+      showToast('Shared workspace updated');
+    }else{
+      await api('/api/admin/shared-workspaces',{method:'POST',body:JSON.stringify(body)});
+      showToast('Shared workspace added');
+    }
+    hideSharedWorkspaceForm();
+    await _loadSharedWorkspaces();
+  }catch(e){
+    if(errEl){errEl.textContent=e.message;errEl.style.display='';}
+    else showToast('Failed: '+e.message,'error');
+  }
+}
+
+async function _deleteSharedWorkspace(path){
+  const ws=_sharedWorkspacesCache.find(w=>w.path===path);
+  const label=ws&&ws.name?ws.name:path;
+  const ok=await showConfirmDialog({title:'Remove Shared Workspace',message:`Remove "${label}" from shared workspaces?`,confirmLabel:'Remove',danger:true,focusCancel:true});
+  if(!ok) return;
+  try{
+    await api('/api/admin/shared-workspaces',{method:'DELETE',body:JSON.stringify({path})});
+    showToast('Shared workspace removed');
+    await _loadSharedWorkspaces();
+  }catch(e){
+    showToast('Remove failed: '+e.message,'error');
   }
 }

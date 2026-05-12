@@ -1440,6 +1440,11 @@ function applyBotName(){
     const _checkUrl='api/updates/check'+(_testUpdates?'?simulate=1':'');
     api(_checkUrl).then(d=>{if(!_testUpdates)sessionStorage.setItem('hermes-update-checked','1');if((d.webui&&d.webui.behind>0)||(d.agent&&d.agent.behind>0))_showUpdateBanner(d);}).catch(()=>{});
   }
+  let bootAuthStatus=null;
+  try{
+    const _bootAuthStatus=await api('/api/auth/status');
+    bootAuthStatus=_bootAuthStatus||null;
+  }catch(e){bootAuthStatus=null;}
   // Fetch active profile
   try{const p=await api('/api/profile/active');S.activeProfile=p.name||'default';}catch(e){S.activeProfile='default';}
   // Update profile chip label immediately
@@ -1485,7 +1490,10 @@ function applyBotName(){
   // Initialize reasoning chip on boot (fixes #1103 — chip hidden until session load)
   if(typeof fetchReasoningChip==='function') fetchReasoningChip();
   const urlSession=(typeof _sessionIdFromLocation==='function')?_sessionIdFromLocation():null;
-  const savedLocal=localStorage.getItem('hermes-webui-session');
+  const savedProfile=(bootAuthStatus&&bootAuthStatus.multi_user&&bootAuthStatus.user&&bootAuthStatus.user.profile_name)
+    ? bootAuthStatus.user.profile_name
+    : (S.activeProfile||'default');
+  const savedLocal=getSavedActiveSessionId(savedProfile);
   const saved=urlSession||savedLocal;
   if(saved){
     try{
@@ -1532,7 +1540,7 @@ function applyBotName(){
       }
       S._bootReady=true;
       syncTopbar();syncWorkspacePanelState();await renderSessionList();if(typeof startGatewaySSE==='function')startGatewaySSE();await checkInflightOnBoot(saved);return;}
-    catch(e){localStorage.removeItem('hermes-webui-session');}
+    catch(e){removeSavedActiveSessionId(savedProfile);}
   }
   // no saved session - show empty state, wait for user to hit +
   S._bootReady=true;

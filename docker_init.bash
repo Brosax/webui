@@ -367,7 +367,15 @@ else
     fi
   done
   if [ -n "$_agent_src" ]; then
-    uv pip install "$_agent_src[all]" --trusted-host pypi.org --trusted-host files.pythonhosted.org || error_exit "Failed to install hermes-agent's requirements"
+    # Avoid the upstream "all" extra here: it includes Mistral/Voxtral support,
+    # and some deploy targets cannot resolve the mistralai package. Operators
+    # can opt into a custom set with HERMES_AGENT_EXTRAS.
+    _agent_extras="${HERMES_AGENT_EXTRAS:-modal,daytona,vercel,messaging,matrix,cron,cli,dev,tts-premium,slack,pty,honcho,mcp,homeassistant,sms,acp,voice,dingtalk,feishu,google,bedrock,web,youtube}"
+    if [ -n "$_agent_extras" ]; then
+      uv pip install "$_agent_src[$_agent_extras]" --trusted-host pypi.org --trusted-host files.pythonhosted.org || error_exit "Failed to install hermes-agent's requirements"
+    else
+      uv pip install "$_agent_src" --trusted-host pypi.org --trusted-host files.pythonhosted.org || error_exit "Failed to install hermes-agent's requirements"
+    fi
   else
     echo ""
     echo "!! WARNING: hermes-agent source not found."

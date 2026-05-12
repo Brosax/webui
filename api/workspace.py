@@ -201,9 +201,7 @@ def load_workspaces() -> list:
             path = str(rule.get("path") or "").strip()
             if not path:
                 continue
-            label = Path(path).name or path
-            if rule.get("mode") == "read_only":
-                label = f"{label} (RO)"
+            label = str(rule.get("name") or Path(path).name or path)
             entry = {"path": path, "name": label, "mode": rule.get("mode", "read_write")}
             if all(Path(s.get("path", "")).resolve() != Path(path).resolve() for s in spaces if s.get("path")):
                 spaces.append(entry)

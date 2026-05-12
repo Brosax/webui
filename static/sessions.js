@@ -17,6 +17,31 @@ const ICONS={
 // before the first request completes (#1060).
 let _loadingSessionId = null;
 
+const ACTIVE_SESSION_STORAGE_PREFIX='hermes-webui-session:';
+
+function activeSessionStorageKey(profile){
+  const raw=(profile!==undefined&&profile!==null)?profile:((typeof S!=='undefined'&&S.activeProfile)||'default');
+  const name=String(raw||'default').trim()||'default';
+  return ACTIVE_SESSION_STORAGE_PREFIX+name;
+}
+
+function getSavedActiveSessionId(profile){
+  return localStorage.getItem(activeSessionStorageKey(profile));
+}
+
+function setSavedActiveSessionId(sid, profile){
+  if(!sid)return;
+  localStorage.setItem(activeSessionStorageKey(profile),sid);
+}
+
+function removeSavedActiveSessionId(profile){
+  localStorage.removeItem(activeSessionStorageKey(profile));
+}
+
+function _isActiveSessionStorageKey(key){
+  return key===activeSessionStorageKey();
+}
+
 // ── Composer draft persistence ────────────────────────────────────────────────
 
 // Debounced save — prevents hammering the server on every keystroke.
@@ -377,7 +402,7 @@ async function newSession(flash, options={}){
   S.session=data.session;S.messages=data.session.messages||[];
   S.lastUsage={...(data.session.last_usage||{})};
   if(flash)S.session._flash=true;
-  localStorage.setItem('hermes-webui-session',S.session.session_id);
+  setSavedActiveSessionId(S.session.session_id);
   _setActiveSessionUrl(S.session.session_id);
   _setSessionViewedCount(S.session.session_id, S.session.message_count || 0);
   // Sync chat-header dropdown to the session's model so the UI reflects
@@ -452,8 +477,8 @@ async function loadSession(sid){
         // If this 404 was for the saved active-session ID (not a click-into request),
         // wipe the stale localStorage value and rethrow so boot can fall through to
         // the empty-state instead of sticking to a broken "Session not available" view.
-        if(!currentSid&&localStorage.getItem('hermes-webui-session')===sid){
-          localStorage.removeItem('hermes-webui-session');
+        if(!currentSid&&getSavedActiveSessionId()===sid){
+          removeSavedActiveSessionId();
           if (_loadingSessionId === sid) _loadingSessionId = null;
           throw e;
         }
@@ -487,7 +512,7 @@ async function loadSession(sid){
   if(typeof syncTopbar==='function') syncTopbar();
   _setSessionViewedCount(S.session.session_id, Number(data.session.message_count || 0));
   _clearSessionCompletionUnread(S.session.session_id);
-  localStorage.setItem('hermes-webui-session',S.session.session_id);
+  setSavedActiveSessionId(S.session.session_id);
   _setActiveSessionUrl(S.session.session_id);
 
   const activeStreamId=S.session.active_stream_id||null;
@@ -1375,7 +1400,7 @@ function _renderBatchActionBar(){
       await Promise.all(ids.map(sid=>api('/api/session/delete',{method:'POST',body:JSON.stringify({session_id:sid})})));
       ids.forEach(_clearHandoffStorageForSession);
       if(S.session&&ids.includes(S.session.session_id)){
-        S.session=null;S.messages=[];S.entries=[];localStorage.removeItem('hermes-webui-session');
+        S.session=null;S.messages=[];S.entries=[];removeSavedActiveSessionId();
         const remaining=await api('/api/sessions');
         if(remaining.sessions&&remaining.sessions.length){await loadSession(remaining.sessions[0].session_id);}
         else{$('msgInner').innerHTML='';$('emptyState').style.display='';}
@@ -2963,7 +2988,7 @@ function renderSessionListFromCache(){
 }
 
 async function _handleActiveSessionStorageEvent(e){
-  if(!e || e.key !== 'hermes-webui-session') return;
+  if(!e || !_isActiveSessionStorageKey(e.key)) return;
   // Do not treat localStorage as a global active-session bus. Each tab owns its
   // active conversation via its URL (/session/<id>), so another tab switching
   // sessions must not force this tab to navigate away from an in-flight turn.
@@ -2999,7 +3024,7 @@ async function deleteSession(sid){
   }catch(e){setStatus(`Delete failed: ${e.message}`);return;}
   if(S.session&&S.session.session_id===sid){
     S.session=null;S.messages=[];S.entries=[];
-    localStorage.removeItem('hermes-webui-session');
+    removeSavedActiveSessionId();
     // load the most recent remaining session, or show blank if none left
     const remaining=await api('/api/sessions');
     if(remaining.sessions&&remaining.sessions.length){
