@@ -1,5 +1,6 @@
 """Workflow data layer: Task/AgentCall/Artifact CRUD via JSON files."""
 from __future__ import annotations
+import fcntl
 import json
 import uuid
 from datetime import datetime, timezone
@@ -11,10 +12,23 @@ STATE_DIR = Path.home() / ".hermes" / "webui-mvp"
 WORKFLOWS_DIR = STATE_DIR / "workflows"
 TASKS_DIR = WORKFLOWS_DIR / "tasks"
 ARTIFACTS_DIR = WORKFLOWS_DIR / "artifacts"
+LOCKS_DIR = WORKFLOWS_DIR / ".locks"
 
 def _ensure_dirs():
     TASKS_DIR.mkdir(parents=True, exist_ok=True)
     ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
+    LOCKS_DIR.mkdir(parents=True, exist_ok=True)
+
+def _with_task_lock(task_id: str, func):
+    """Execute func with exclusive lock on task file."""
+    lock_path = LOCKS_DIR / f"{task_id}.lock"
+    with open(lock_path, 'w') as f:
+        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+        try:
+            return func()
+        finally:
+            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+            lock_path.unlink(missing_ok=True)
 
 def _load_json(path: Path) -> dict:
     if path.exists():
@@ -72,53 +86,63 @@ def update_task(task_id: str, **kwargs) -> Optional[dict]:
 
 def delete_task(task_id: str) -> bool:
     """Delete a task and its artifacts."""
-    task = get_task(task_id)
-    if not task:
-        return False
-    # Delete artifacts
-    for art_id in task.get("artifacts", []):
-        art_dir = ARTIFACTS_DIR / art_id
-        if art_dir.exists():
-            shutil.rmtree(art_dir)
-    # Delete task file
-    (TASKS_DIR / f"{task_id}.json").unlink(missing_ok=True)
-    return True
+    def _do_delete():
+        task = get_task(task_id)
+        if not task:
+            return False
+        # Verify artifact IDs are valid UUIDs and actually exist before deletion
+        for art_id in task.get("artifacts", []):
+            # Safety check: verify art_id looks like a UUID before attempting deletion
+            try:
+                uuid.UUID(art_id)
+                art_dir = ARTIFACTS_DIR / art_id
+                if art_dir.exists():
+                    shutil.rmtree(art_dir)
+            except (ValueError, OSError):
+                # Skip invalid UUIDs or permission errors
+                pass
+        # Delete task file
+        (TASKS_DIR / f"{task_id}.json").unlink(missing_ok=True)
+        return True
+    return _with_task_lock(task_id, _do_delete)
 
 # ── AgentCall ────────────────────────────────────────────────────────────────
 def create_agent_call(task_id: str, agent_name: str, parent_call_id: str = None,
                       input_data: dict = None) -> Optional[dict]:
     """Create an agent call record linked to a task."""
-    task = get_task(task_id)
-    if not task:
-        return None
-    call_id = str(uuid.uuid4())
-    now = datetime.now(timezone.utc).isoformat()
-    call = {
-        "id": call_id,
-        "task_id": task_id,
-        "parent_call_id": parent_call_id,
-        "agent_name": agent_name,
-        "status": "pending",
-        "started_at": now,
-        "ended_at": None,
-        "input": input_data or {},
-        "output": None,
-        "error": None,
-        "children": []
-    }
-    _ensure_dirs()
-    _save_json(TASKS_DIR / f"{call_id}_call.json", call)
-    # Link to parent
-    if parent_call_id:
-        parent = get_agent_call(parent_call_id)
-        if parent:
-            parent["children"] = parent.get("children", []) + [call_id]
-            _save_json(TASKS_DIR / f"{parent_call_id}_call.json", parent)
-    # Link to task
-    task["calls"] = task.get("calls", []) + [call_id]
-    task["updated_at"] = now
-    _save_json(TASKS_DIR / f"{task_id}.json", task)
-    return call
+    def _do_create():
+        task = get_task(task_id)
+        if not task:
+            return None
+        call_id = str(uuid.uuid4())
+        now = datetime.now(timezone.utc).isoformat()
+        call = {
+            "id": call_id,
+            "task_id": task_id,
+            "parent_call_id": parent_call_id,
+            "agent_name": agent_name,
+            "status": "pending",
+            "started_at": now,
+            "ended_at": None,
+            "input": input_data or {},
+            "output": None,
+            "error": None,
+            "children": []
+        }
+        _ensure_dirs()
+        _save_json(TASKS_DIR / f"{call_id}_call.json", call)
+        # Link to parent
+        if parent_call_id:
+            parent = get_agent_call(parent_call_id)
+            if parent:
+                parent["children"] = parent.get("children", []) + [call_id]
+                _save_json(TASKS_DIR / f"{parent_call_id}_call.json", parent)
+        # Link to task
+        task["calls"] = task.get("calls", []) + [call_id]
+        task["updated_at"] = now
+        _save_json(TASKS_DIR / f"{task_id}.json", task)
+        return call
+    return _with_task_lock(task_id, _do_create)
 
 def get_agent_call(call_id: str) -> Optional[dict]:
     """Get an agent call by ID."""
@@ -149,33 +173,35 @@ def update_agent_call(call_id: str, **kwargs) -> Optional[dict]:
 def create_artifact(task_id: str, call_id: str, name: str, content: str,
                     artifact_type: str = "document", metadata: dict = None) -> Optional[dict]:
     """Create an artifact file."""
-    task = get_task(task_id)
-    if not task:
-        return None
-    art_id = str(uuid.uuid4())
-    now = datetime.now(timezone.utc).isoformat()
-    artifact_dir = ARTIFACTS_DIR / art_id
-    artifact_dir.mkdir(parents=True, exist_ok=True)
-    # Save content
-    file_path = artifact_dir / name
-    file_path.write_text(content, encoding="utf-8")
-    artifact = {
-        "id": art_id,
-        "task_id": task_id,
-        "call_id": call_id,
-        "name": name,
-        "type": artifact_type,
-        "path": str(file_path),
-        "size": len(content),
-        "created_at": now,
-        "metadata": metadata or {}
-    }
-    _save_json(artifact_dir / "meta.json", artifact)
-    # Link to task
-    task["artifacts"] = task.get("artifacts", []) + [art_id]
-    task["updated_at"] = now
-    _save_json(TASKS_DIR / f"{task_id}.json", task)
-    return artifact
+    def _do_create():
+        task = get_task(task_id)
+        if not task:
+            return None
+        art_id = str(uuid.uuid4())
+        now = datetime.now(timezone.utc).isoformat()
+        artifact_dir = ARTIFACTS_DIR / art_id
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        # Save content
+        file_path = artifact_dir / name
+        file_path.write_text(content, encoding="utf-8")
+        artifact = {
+            "id": art_id,
+            "task_id": task_id,
+            "call_id": call_id,
+            "name": name,
+            "type": artifact_type,
+            "path": str(file_path),
+            "size": len(content),
+            "created_at": now,
+            "metadata": metadata or {}
+        }
+        _save_json(artifact_dir / "meta.json", artifact)
+        # Link to task
+        task["artifacts"] = task.get("artifacts", []) + [art_id]
+        task["updated_at"] = now
+        _save_json(TASKS_DIR / f"{task_id}.json", task)
+        return artifact
+    return _with_task_lock(task_id, _do_create)
 
 def get_artifact(artifact_id: str) -> Optional[dict]:
     """Get artifact metadata."""

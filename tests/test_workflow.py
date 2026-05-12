@@ -45,8 +45,20 @@ def test_update_task():
 def test_delete_task():
     task = create_task("To Delete", {})
     task_id = task["id"]
+
+    # Create an artifact to verify deletion
+    call = create_agent_call(task_id, "test_agent")
+    artifact = create_artifact(task_id, call["id"], "test.txt", "content")
+    artifact_id = artifact["id"]
+
+    # Verify artifact exists
+    assert (ARTIFACTS_DIR / artifact_id).exists()
+
     assert delete_task(task_id) is True
     assert get_task(task_id) is None
+
+    # Verify artifact was deleted
+    assert not (ARTIFACTS_DIR / artifact_id).exists()
 
 def test_agent_call_lifecycle():
     task = create_task("Task with Call", {})
