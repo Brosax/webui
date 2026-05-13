@@ -703,7 +703,10 @@
   .sidebar-nav{display:flex;border-bottom:1px solid var(--border);flex-shrink:0;padding:6px 8px 0;gap:2px;}
   .nav-tab{flex:1;padding:10px 4px 8px;font-size:20px;text-align:center;cursor:pointer;color:var(--muted);border:none;background:none;transition:color .15s;border-bottom:2px solid transparent;white-space:nowrap;overflow:hidden;position:relative;display:flex;align-items:center;justify-content:center;}
   .nav-tab:hover{color:var(--text);}
-  /* Hide Profiles from the primary nav while keeping footer profile switching. */
+  /* Hide lower-priority panels from the primary nav while keeping deep links and
+     footer profile switching intact. */
+  .rail .nav-tab[data-panel="kanban"],
+  .sidebar-nav .nav-tab[data-panel="kanban"]{display:none;}
   .rail .nav-tab[data-panel="profiles"],
   .sidebar-nav .nav-tab[data-panel="profiles"]{display:none;}
   /* Legacy hover-tooltip — kept for the mobile `.sidebar-nav` only, where it
