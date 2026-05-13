@@ -15,7 +15,7 @@
 <link rel="apple-touch-icon" sizes="512x512" href="static/apple-touch-icon.png">
 <!-- base href enables subpath mount support; all static paths must stay relative (no leading slash) -->
 <script>(function(){var path=location.pathname,marker='/session/',i=path.indexOf(marker),p;i>=0?p=(path.slice(0,i+1)||'/'):p=(path.endsWith('/')?path:(path.replace(/\/[^\/]*$/,'/')||'/'));document.write('<base href="'+location.origin+p+'">');})()</script>
-<script>(function(){var themes={light:1,dark:1,system:1},skins={default:1,ares:1,mono:1,slate:1,poseidon:1,sisyphus:1,charizard:1,sienna:1},legacy={slate:['dark','slate'],solarized:['dark','poseidon'],monokai:['dark','sisyphus'],nord:['dark','slate'],oled:['dark','default']},t=(localStorage.getItem('hermes-theme')||'dark').toLowerCase(),s=(localStorage.getItem('hermes-skin')||'').toLowerCase(),m=legacy[t],theme=m?m[0]:(themes[t]?t:'dark'),skin=skins[s]?s:(m?m[1]:'default');localStorage.setItem('hermes-theme',theme);localStorage.setItem('hermes-skin',skin);if(theme==='system')theme=window.matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light';if(theme==='dark')document.documentElement.classList.add('dark');if(skin!=='default')document.documentElement.dataset.skin=skin;})()</script>
+<script>(function(){var themes={light:1,dark:1,system:1},skins={default:1,ares:1,mono:1,slate:1,poseidon:1,sisyphus:1,charizard:1,sienna:1,evergreen:1},legacy={slate:['dark','slate'],solarized:['dark','poseidon'],monokai:['dark','sisyphus'],nord:['dark','slate'],oled:['dark','default'],evergreen:['dark','evergreen']},t=(localStorage.getItem('hermes-theme')||'dark').toLowerCase(),s=(localStorage.getItem('hermes-skin')||'').toLowerCase(),m=legacy[t],theme=m?m[0]:(themes[t]?t:'dark'),skin=skins[s]?s:(m?m[1]:'default');localStorage.setItem('hermes-theme',theme);localStorage.setItem('hermes-skin',skin);if(theme==='system')theme=window.matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light';if(theme==='dark')document.documentElement.classList.add('dark');if(skin!=='default')document.documentElement.dataset.skin=skin;})()</script>
 <script>(function(){var fs=localStorage.getItem('hermes-font-size');if(fs&&fs!=='default')document.documentElement.dataset.fontSize=fs;})()</script>
 <!-- theme-color: surfaces the active theme's background to native chrome (Safari status bar, PWA, native WKWebView wrappers). Updated dynamically by boot.js when theme/skin changes. The light/dark default values match style.css :root --bg-1 / :root.dark --bg-1. -->
 <meta name="theme-color" content="#FEFCF7" media="(prefers-color-scheme: light)">
@@ -66,20 +66,6 @@
     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
   </button>
   <div class="app-titlebar-inner">
-    <span class="app-titlebar-icon" aria-hidden="true">
-      <svg viewBox="0 0 64 64" width="16" height="16" aria-hidden="true">
-        <defs>
-          <linearGradient id="app-titlebar-gold" x1="0%" y1="0%" x2="0%" y2="100%">
-            <stop offset="0%" style="stop-color:#F5C542"/>
-            <stop offset="100%" style="stop-color:#D4961C"/>
-          </linearGradient>
-        </defs>
-        <rect x="30" y="10" width="4" height="46" rx="2" fill="url(#app-titlebar-gold)"/>
-        <path d="M30 18 C24 14, 14 14, 10 18 C14 16, 22 16, 28 20" fill="#F5C542" opacity="0.9"/>
-        <path d="M34 18 C40 14, 50 14, 54 18 C50 16, 42 16, 36 20" fill="#F5C542" opacity="0.9"/>
-        <circle cx="32" cy="10" r="4" fill="#F5C542"/>
-      </svg>
-    </span>
     <span class="app-titlebar-title" id="appTitlebarTitle">Hermes</span>
     <span class="app-titlebar-sub" id="appTitlebarSub" hidden></span>
   </div>
@@ -89,9 +75,11 @@
   <nav class="rail" aria-label="Primary navigation">
     <button class="rail-btn nav-tab active has-tooltip" data-panel="chat" onclick="switchPanel('chat',{fromRailClick:true})" data-tooltip="Chat" data-i18n-title="tab_chat" aria-label="Chat"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg></button>
     <button class="rail-btn nav-tab has-tooltip" data-panel="tasks" onclick="switchPanel('tasks',{fromRailClick:true})" data-tooltip="Tasks" data-i18n-title="tab_tasks" aria-label="Tasks"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg></button>
+    <button class="rail-btn nav-tab has-tooltip" data-panel="assistant" onclick="switchPanel('assistant',{fromRailClick:true})" data-tooltip="My Assistant" data-i18n-title="tab_assistant" aria-label="My Assistant"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 2l1.8 4.6L18 8.4l-4.2 1.8L12 15l-1.8-4.8L6 8.4l4.2-1.8L12 2z"/><path d="M5 17l1 2.5L8.5 21l-2.5 1L5 24l-1-2.5L1.5 21l2.5-1L5 17z" transform="translate(0 -2) scale(.85)"/><path d="M18.5 15.5l.7 1.8 1.8.7-1.8.7-.7 1.8-.7-1.8-1.8-.7 1.8-.7z"/></svg></button>
     <button class="rail-btn nav-tab has-tooltip" data-panel="kanban" onclick="switchPanel('kanban',{fromRailClick:true})" data-tooltip="Kanban" data-i18n-title="tab_kanban" aria-label="Kanban" style="display:none">
     <button class="rail-btn nav-tab has-tooltip" data-panel="skills" onclick="switchPanel('skills',{fromRailClick:true})" data-tooltip="Skills" data-i18n-title="tab_skills" aria-label="Skills"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg></button>
     <button class="rail-btn nav-tab has-tooltip" data-panel="memory" onclick="switchPanel('memory',{fromRailClick:true})" data-tooltip="Memory" data-i18n-title="tab_memory" aria-label="Memory"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9.5 2A2.5 2.5 0 0 1 12 4.5v15a2.5 2.5 0 0 1-4.96-.44 2.5 2.5 0 0 1-2.96-3.08 3 3 0 0 1-.34-5.58 2.5 2.5 0 0 1 1.32-4.24 2.5 2.5 0 0 1 1.98-3A2.5 2.5 0 0 1 9.5 2z"/><path d="M14.5 2A2.5 2.5 0 0 0 12 4.5v15a2.5 2.5 0 0 0 4.96-.44 2.5 2.5 0 0 0 2.96-3.08 3 3 0 0 0 .34-5.58 2.5 2.5 0 0 0-1.32-4.24 2.5 2.5 0 0 0-1.98-3A2.5 2.5 0 0 0 14.5 2z"/></svg></button>
+    <button class="rail-btn nav-tab has-tooltip" data-panel="workflow" onclick="switchPanel('workflow',{fromRailClick:true})" data-tooltip="Workflow" data-i18n-title="tab_workflow" aria-label="Workflow"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="16 3 21 3 21 8"/><line x1="4" y1="20" x2="21" y2="3"/><polyline points="21 16 21 21 16 21"/><line x1="15" y1="15" x2="21" y2="21"/><line x1="4" y1="4" x2="9" y2="9"/></svg></button>
     <button class="rail-btn nav-tab has-tooltip" data-panel="workspaces" onclick="switchPanel('workspaces',{fromRailClick:true})" data-tooltip="Spaces" data-i18n-title="tab_workspaces" aria-label="Spaces"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg></button>
     <button class="rail-btn nav-tab has-tooltip" data-panel="profiles" onclick="switchPanel('profiles',{fromRailClick:true})" data-tooltip="Agent profiles" data-i18n-title="tab_profiles" aria-label="Agent profiles"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg></button>
     <button class="rail-btn nav-tab has-tooltip" data-panel="todos" onclick="switchPanel('todos',{fromRailClick:true})" data-tooltip="Current task list" data-i18n-title="tab_todos" aria-label="Todos"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="5" width="6" height="6" rx="1"/><path d="m3 17 2 2 4-4"/><path d="M13 6h8"/><path d="M13 12h8"/><path d="M13 18h8"/></svg></button>
@@ -106,6 +94,7 @@
     <div class="sidebar-nav">
       <button class="nav-tab active has-tooltip has-tooltip--bottom" data-panel="chat" data-label="Chat" onclick="switchPanel('chat',{fromRailClick:true})" data-tooltip="Chat" data-i18n-title="tab_chat"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg></button>
       <button class="nav-tab has-tooltip has-tooltip--bottom" data-panel="tasks" data-label="Tasks" onclick="switchPanel('tasks',{fromRailClick:true})" data-tooltip="Tasks" data-i18n-title="tab_tasks"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="18" rx="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg></button>
+      <button class="nav-tab has-tooltip has-tooltip--bottom" data-panel="assistant" data-label="My Assistant" onclick="switchPanel('assistant',{fromRailClick:true})" data-tooltip="My Assistant" data-i18n-title="tab_assistant"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 2l1.8 4.6L18 8.4l-4.2 1.8L12 15l-1.8-4.8L6 8.4l4.2-1.8L12 2z"/><path d="M18.5 15.5l.7 1.8 1.8.7-1.8.7-.7 1.8-.7-1.8-1.8-.7 1.8-.7z"/></svg></button>
       <button class="nav-tab has-tooltip has-tooltip--bottom" data-panel="kanban" data-label="Kanban" onclick="switchPanel('kanban',{fromRailClick:true})" data-tooltip="Kanban" data-i18n-title="tab_kanban" style="display:none">
       <button class="nav-tab has-tooltip has-tooltip--bottom" data-panel="skills" data-label="Skills" onclick="switchPanel('skills',{fromRailClick:true})" data-tooltip="Skills" data-i18n-title="tab_skills"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg></button>
       <button class="nav-tab has-tooltip has-tooltip--bottom" data-panel="memory" data-label="Memory" onclick="switchPanel('memory',{fromRailClick:true})" data-tooltip="Memory" data-i18n-title="tab_memory"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9.5 2A2.5 2.5 0 0 1 12 4.5v15a2.5 2.5 0 0 1-4.96-.44 2.5 2.5 0 0 1-2.96-3.08 3 3 0 0 1-.34-5.58 2.5 2.5 0 0 1 1.32-4.24 2.5 2.5 0 0 1 1.98-3A2.5 2.5 0 0 1 9.5 2z"/><path d="M14.5 2A2.5 2.5 0 0 0 12 4.5v15a2.5 2.5 0 0 0 4.96-.44 2.5 2.5 0 0 0 2.96-3.08 3 3 0 0 0 .34-5.58 2.5 2.5 0 0 0-1.32-4.24 2.5 2.5 0 0 0-1.98-3A2.5 2.5 0 0 0 14.5 2z"/></svg></button>
@@ -192,7 +181,37 @@
       <div class="side-menu" id="memoryPanel"><div style="padding:12px;color:var(--muted);font-size:12px" data-i18n="loading">Loading...</div></div>
     </div>
     <!-- Workflow panel -->
-    <div class="panel-view" id="panelWorkflow"></div>
+    <div class="panel-view" id="panelWorkflow">
+      <div class="panel-head">
+        <span data-i18n="workflow_definitions">Workflow definitions</span>
+        <div class="panel-head-actions">
+          <button class="panel-head-btn has-tooltip has-tooltip--bottom" id="workflowRefreshBtn" onclick="loadWorkflowTasks()" data-tooltip="Refresh" aria-label="Refresh"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg></button>
+          <button class="panel-head-btn has-tooltip has-tooltip--bottom" id="workflowCollapseBtn" onclick="toggleTraceTimeline()" data-tooltip="Collapse/Expand" aria-label="Collapse/Expand" style="display:none"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg></button>
+          <button class="panel-head-btn has-tooltip has-tooltip--bottom" onclick="openWorkflowCreate()" data-tooltip="New workflow" data-i18n-title="workflow_new_definition" aria-label="New workflow"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>
+          <button class="panel-head-btn has-tooltip has-tooltip--bottom" onclick="switchWorkflowView('canvas')" data-tooltip="Canvas editor" data-i18n-title="workflow_canvas" aria-label="Canvas"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="16 3 21 3 21 8"/><line x1="4" y1="20" x2="21" y2="3"/><polyline points="21 16 21 21 16 21"/><line x1="15" y1="15" x2="21" y2="21"/><line x1="4" y1="4" x2="9" y2="9"/></svg></button>
+        </div>
+      </div>
+      <div class="workflow-list" id="workflowList"><div style="padding:12px;color:var(--muted);font-size:12px" data-i18n="loading">Loading...</div></div>
+      <div id="workflow-canvas-panel" style="display:none;flex-direction:column;flex:1;min-height:0">
+        <div class="canvas-toolbar">
+          <button class="btn btn-sm" onclick="addCanvasNode('file_input')">📁 Input</button>
+          <button class="btn btn-sm" onclick="addCanvasNode('agent')">🤖 Agent</button>
+          <button class="btn btn-sm" onclick="addCanvasNode('prompt')">💬 Prompt</button>
+          <button class="btn btn-sm" onclick="addCanvasNode('file_output')">💾 Output</button>
+          <span class="toolbar-sep"></span>
+          <button class="btn btn-sm btn-accent" onclick="saveCanvasWorkflow()">Save</button>
+          <button class="btn btn-sm" onclick="runCanvasWorkflow()">Run</button>
+        </div>
+        <div class="canvas-split">
+          <div class="canvas-area">
+            <svg id="workflow-canvas-svg" class="workflow-canvas-svg"><defs><marker id="arrow" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto"><path d="M0,0 L0,6 L9,3 z" fill="var(--accent)"/></marker></defs></svg>
+          </div>
+          <div class="canvas-config-panel" id="canvasConfigPanel">
+            <div class="canvas-config-empty">Select a node to configure</div>
+          </div>
+        </div>
+      </div>
+    </div>
     <!-- Todo panel -->
     <div class="panel-view" id="panelTodos">
       <div class="panel-head">
@@ -692,6 +711,134 @@
         <div class="main-view-empty-sub" data-i18n="memory_empty_sub">Pick a section from the sidebar to view or edit its contents.</div>
       </div>
     </div>
+    <div id="mainAssistant" class="main-view">
+      <div class="main-view-header">
+        <div class="main-view-title" data-i18n="tab_assistant">My Assistant</div>
+        <div class="main-view-actions">
+          <button id="btnAssistantRefresh" class="panel-head-btn has-tooltip has-tooltip--bottom" data-tooltip="Refresh" aria-label="Refresh" onclick="loadAssistant(true)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg></button>
+          <button id="btnAssistantNew" class="panel-head-btn has-tooltip has-tooltip--bottom" data-tooltip="New assistant routine" aria-label="New assistant routine" onclick="openAssistantRoutineForm()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>
+        </div>
+      </div>
+      <div class="main-view-body assistant-body">
+        <div class="assistant-workbench">
+          <section class="assistant-section assistant-memory-section">
+            <div class="assistant-section-head">
+              <div>
+                <div class="assistant-section-title" data-i18n="personal_memory">Personal memory</div>
+                <div class="assistant-section-meta" id="assistantMemoryMeta">—</div>
+              </div>
+              <div class="assistant-section-actions">
+                <button class="panel-head-btn has-tooltip has-tooltip--bottom" data-tooltip="Save memory" aria-label="Save memory" onclick="saveAssistantMemory()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg></button>
+              </div>
+            </div>
+            <div class="assistant-memory-grid">
+              <div class="assistant-memory-col">
+                <label for="assistantMemoryMd">MEMORY.md</label>
+                <textarea id="assistantMemoryMd" spellcheck="false" rows="16" placeholder="Personal memory..."></textarea>
+              </div>
+              <div class="assistant-memory-col">
+                <label for="assistantUserMd">USER.md</label>
+                <textarea id="assistantUserMd" spellcheck="false" rows="16" placeholder="User profile memory..."></textarea>
+              </div>
+            </div>
+          </section>
+          <section class="assistant-section assistant-cockpit-section">
+            <div class="assistant-section-head">
+              <div>
+                <div class="assistant-section-title">Daily cockpit</div>
+                <div class="assistant-section-meta" id="assistantCockpitMeta">Generate a draft to start.</div>
+              </div>
+              <div class="assistant-section-actions">
+                <button class="panel-head-btn has-tooltip has-tooltip--bottom" data-tooltip="Today plan" aria-label="Today plan" onclick="generateAssistantCockpit('today')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 2v4"/><path d="M16 2v4"/><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M3 10h18"/></svg></button>
+                <button class="panel-head-btn has-tooltip has-tooltip--bottom" data-tooltip="End-of-day summary" aria-label="End-of-day summary" onclick="generateAssistantCockpit('summary')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="8" y1="13" x2="16" y2="13"/><line x1="8" y1="17" x2="16" y2="17"/></svg></button>
+                <button class="panel-head-btn has-tooltip has-tooltip--bottom" data-tooltip="Stale reminders" aria-label="Stale reminders" onclick="generateAssistantCockpit('stale')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" y1="6" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg></button>
+                <button class="panel-head-btn has-tooltip has-tooltip--bottom" data-tooltip="Use in Teams" aria-label="Use in Teams" onclick="applyAssistantDraftToTeams()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 2 11 13"/><path d="m22 2-7 20-4-9-9-4z"/></svg></button>
+              </div>
+            </div>
+            <textarea id="assistantCockpitDraft" rows="10" spellcheck="false" placeholder="Generated draft appears here..."></textarea>
+          </section>
+          <section class="assistant-section assistant-routines-section">
+            <div class="assistant-section-head">
+              <div>
+                <div class="assistant-section-title">Routines</div>
+                <div class="assistant-section-meta" id="assistantRoutinesMeta">—</div>
+              </div>
+              <div class="assistant-section-actions">
+                <button class="panel-head-btn has-tooltip has-tooltip--bottom" data-tooltip="Run now" aria-label="Run now" onclick="runSelectedAssistantRoutine()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="5 3 19 12 5 21 5 3"/></svg></button>
+                <button class="panel-head-btn has-tooltip has-tooltip--bottom" data-tooltip="Save routine" aria-label="Save routine" onclick="saveAssistantRoutine()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg></button>
+              </div>
+            </div>
+            <div id="assistantRoutineList" class="assistant-routine-list"></div>
+            <form id="assistantRoutineForm" class="assistant-routine-form" onsubmit="event.preventDefault(); saveAssistantRoutine();">
+              <div class="assistant-form-row">
+                <label for="assistantRoutineName">Name</label>
+                <input id="assistantRoutineName" type="text" autocomplete="off" placeholder="Optional">
+              </div>
+              <div class="assistant-form-row">
+                <label for="assistantRoutinePrompt">Prompt</label>
+                <textarea id="assistantRoutinePrompt" rows="6" spellcheck="false" placeholder="What the assistant should do."></textarea>
+              </div>
+              <div class="assistant-form-row">
+                <label>Schedule</label>
+                <div id="assistantScheduleModes" class="assistant-schedule-modes">
+                  <button type="button" class="assistant-mode-btn active" data-mode="daily" onclick="setAssistantScheduleMode('daily')" data-i18n="cron_schedule_mode_daily">每天</button>
+                  <button type="button" class="assistant-mode-btn" data-mode="weekly" onclick="setAssistantScheduleMode('weekly')" data-i18n="cron_schedule_mode_weekly">每周</button>
+                  <button type="button" class="assistant-mode-btn" data-mode="interval" onclick="setAssistantScheduleMode('interval')" data-i18n="cron_schedule_mode_interval">间隔</button>
+                  <button type="button" class="assistant-mode-btn" data-mode="custom" onclick="setAssistantScheduleMode('custom')" data-i18n="cron_schedule_mode_custom">自定义</button>
+                </div>
+                <div id="assistantScheduleDaily" class="assistant-schedule-pane">
+                  <label for="assistantDailyTime">Time</label>
+                  <input id="assistantDailyTime" type="time" value="09:00">
+                </div>
+                <div id="assistantScheduleWeekly" class="assistant-schedule-pane" style="display:none">
+                  <label for="assistantWeeklyDow">Day</label>
+                  <select id="assistantWeeklyDow">
+                    <option value="1">Mon</option><option value="2">Tue</option><option value="3">Wed</option><option value="4">Thu</option><option value="5">Fri</option><option value="6">Sat</option><option value="0">Sun</option>
+                  </select>
+                  <label for="assistantWeeklyTime">Time</label>
+                  <input id="assistantWeeklyTime" type="time" value="09:00">
+                </div>
+                <div id="assistantScheduleInterval" class="assistant-schedule-pane" style="display:none">
+                  <input id="assistantIntervalValue" type="number" min="1" value="1">
+                  <select id="assistantIntervalUnit">
+                    <option value="minutes">Minutes</option>
+                    <option value="hours">Hours</option>
+                    <option value="days">Days</option>
+                  </select>
+                </div>
+                <div id="assistantScheduleCustom" class="assistant-schedule-pane" style="display:none">
+                  <input id="assistantCustomSchedule" type="text" placeholder="0 9 * * *">
+                </div>
+              </div>
+              <div class="assistant-form-row assistant-form-inline">
+                <label style="display:flex;align-items:center;gap:8px;cursor:pointer"><input id="assistantMemoryInjection" type="checkbox" checked> <span>Inject memory</span></label>
+                <label style="display:flex;align-items:center;gap:8px;cursor:pointer"><input id="assistantDeliverTeams" type="checkbox"> <span>Send results to Teams</span></label>
+              </div>
+              <div id="assistantRoutineError" class="detail-form-error" style="display:none"></div>
+              <input type="hidden" id="assistantRoutineId" value="">
+            </form>
+          </section>
+          <section class="assistant-section assistant-teams-section">
+            <div class="assistant-section-head">
+              <div>
+                <div class="assistant-section-title">Teams</div>
+                <div class="assistant-section-meta" id="assistantTeamsStatus">—</div>
+              </div>
+              <div class="assistant-section-actions">
+                <button class="panel-head-btn has-tooltip has-tooltip--bottom" data-tooltip="Send test" aria-label="Send test" onclick="sendAssistantTeamsMessage('test')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12h14"/><path d="M13 5l7 7-7 7"/></svg></button>
+                <button class="panel-head-btn has-tooltip has-tooltip--bottom" data-tooltip="Send now" aria-label="Send now" onclick="sendAssistantTeamsMessage('now')"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 2 11 13"/><path d="m22 2-7 20-4-9-9-4z"/></svg></button>
+              </div>
+            </div>
+            <textarea id="assistantTeamsMessage" rows="5" spellcheck="false" placeholder="Type a Teams message..."></textarea>
+            <div class="assistant-defaults">
+              <label style="display:flex;align-items:center;gap:8px;cursor:pointer"><input id="assistantConfigMemoryInjection" type="checkbox" checked> <span>Default memory injection</span></label>
+              <label style="display:flex;align-items:center;gap:8px;cursor:pointer"><input id="assistantConfigDefaultTeams" type="checkbox"> <span>Default deliver to Teams</span></label>
+              <button type="button" class="btn secondary" onclick="saveAssistantConfig()">Save defaults</button>
+            </div>
+          </section>
+        </div>
+      </div>
+    </div>
     <div id="mainTasks" class="main-view">
       <div class="main-view-header">
         <div class="main-view-title" id="taskDetailTitle"></div>
@@ -711,6 +858,22 @@
         <svg class="main-view-empty-icon" width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
         <div class="main-view-empty-title" data-i18n="tasks_empty_title">Select a scheduled job</div>
         <div class="main-view-empty-sub" data-i18n="tasks_empty_sub">Pick a job from the sidebar to view its details and runs, or create a new one.</div>
+      </div>
+    </div>
+    <div id="mainWorkflow" class="main-view">
+      <div class="main-view-header">
+        <div class="main-view-title" id="workflowDetailTitle"></div>
+        <div class="main-view-actions">
+          <button id="btnWorkflowBack" class="panel-head-btn has-tooltip has-tooltip--bottom" data-tooltip="Back" data-i18n-title="back" onclick="closeTraceDetail()" style="display:none"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="15 18 9 12 15 6"/></svg></button>
+          <button id="btnWorkflowTrace" class="panel-head-btn has-tooltip has-tooltip--bottom" data-tooltip="Full trace" data-i18n-title="workflow_full_trace" onclick="openTraceViewFromDetail()" style="display:none"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg></button>
+          <button id="btnWorkflowCancel" class="panel-head-btn has-tooltip has-tooltip--bottom" data-tooltip="Cancel run" data-i18n-title="workflow_cancel_run" onclick="cancelWorkflowFromDetail()" style="display:none"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></svg></button>
+        </div>
+      </div>
+      <div class="main-view-body" id="workflowDetailBody" style="display:none"></div>
+      <div class="main-view-empty" id="workflowDetailEmpty">
+        <svg class="main-view-empty-icon" width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+        <div class="main-view-empty-title" data-i18n="workflow_empty_title">Select a workflow</div>
+        <div class="main-view-empty-sub" data-i18n="workflow_empty_sub">Pick a workflow definition to edit, publish, run, and review evidence.</div>
       </div>
     </div>
     <div id="mainKanban" class="main-view">
@@ -1378,6 +1541,7 @@
 <script src="static/messages.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/panels.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/workflow.js?v=__WEBUI_VERSION__" defer></script>
+<script src="static/workflow-canvas.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/onboarding.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/boot.js?v=__WEBUI_VERSION__" defer></script>
 

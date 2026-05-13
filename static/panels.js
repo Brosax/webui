@@ -23,6 +23,12 @@ let _cronList = null; // cached cron jobs (array)
 let _currentCronDetail = null; // full cron job object
 let _cronMode = 'empty'; // 'empty' | 'read' | 'create' | 'edit'
 let _cronPreFormDetail = null; // snapshot of prior selection when entering a form
+let _assistantJobs = []; // assistant page job cache
+let _assistantSelectedJobId = '';
+let _assistantData = null; // memory/config/status payload cache
+let _assistantScheduleMode = 'daily';
+let _assistantTeamsConfigured = false;
+let _assistantCockpitKind = 'today';
 let _currentWorkspaceDetail = null; // { path, name, is_default }
 let _workspaceMode = 'empty'; // 'empty' | 'read' | 'create' | 'edit'
 let _workspacePreFormDetail = null;
@@ -36,7 +42,7 @@ let _lastLogsLines = [];
 // Map of panel names → i18n keys for the app titlebar label.
 const APP_TITLEBAR_KEYS = {
   chat: 'tab_chat', tasks: 'tab_tasks', skills: 'tab_skills',
-  memory: 'tab_memory', workspaces: 'tab_workspaces',
+  memory: 'tab_memory', assistant: 'tab_assistant', workspaces: 'tab_workspaces',
   profiles: 'tab_profiles', todos: 'tab_todos', insights: 'tab_insights', logs: 'tab_logs',
   workflow: 'tab_workflow', settings: 'tab_settings',
 };
@@ -224,7 +230,7 @@ async function switchPanel(name, opts = {}) {
   // showing-<name> class on <main>; no class means chat (the default).
   const mainEl = document.querySelector('main.main');
   if (mainEl) {
-    ['settings','skills','memory','tasks','workspaces','profiles','insights','logs'].forEach(p => {
+    ['settings','skills','memory','assistant','tasks','workflow','workspaces','profiles','insights','logs'].forEach(p => {
       mainEl.classList.toggle('showing-' + p, nextPanel === p);
     });
   }
@@ -233,6 +239,7 @@ async function switchPanel(name, opts = {}) {
   // if (nextPanel === 'kanban') await loadKanban();
   if (nextPanel === 'skills') await loadSkills();
   if (nextPanel === 'memory') await loadMemory();
+  if (nextPanel === 'assistant') await loadAssistant();
   if (nextPanel === 'workflow') await loadWorkflowTasks();
   if (nextPanel === 'workspaces') await loadWorkspacesPanel();
   if (nextPanel === 'profiles') await loadProfilesPanel();
@@ -240,6 +247,7 @@ async function switchPanel(name, opts = {}) {
   if (nextPanel === 'insights') await loadInsights();
   if (nextPanel === 'logs') await loadLogs();
   _syncLogsAutoRefresh();
+  if (nextPanel === 'workflowcanvas') initCanvas(document.getElementById('workflow-canvas-svg'));
   if (typeof _syncSystemHealthMonitorVisibility === 'function') _syncSystemHealthMonitorVisibility();
   if (nextPanel === 'settings') {
     switchSettingsSection(_currentSettingsSection);
@@ -392,6 +400,7 @@ function _cronDiagnostics(job) {
     schedule_display: job.schedule_display || null,
     enabled: job.enabled,
     state: job.state,
+    assistant_managed: !!job.assistant_managed,
     next_run_at: job.next_run_at || null,
     last_run_at: job.last_run_at || null,
     last_status: job.last_status || null,
@@ -420,7 +429,20 @@ async function loadCrons(animate) {
       return;
     }
     box.innerHTML = '';
-    for (const job of _cronList) {
+    const assistantJobs = _cronList.filter(job => !!job.assistant_managed);
+    const otherJobs = _cronList.filter(job => !job.assistant_managed);
+    const groups = assistantJobs.length ? [
+      {label: 'Assistant', jobs: assistantJobs, key: 'assistant'},
+      ...(otherJobs.length ? [{label: 'Tasks', jobs: otherJobs, key: 'tasks'}] : []),
+    ] : [{label: '', jobs: _cronList, key: 'all'}];
+    for (const group of groups) {
+      if (group.label) {
+        const header = document.createElement('div');
+        header.className = 'cron-group-header';
+        header.textContent = group.label;
+        box.appendChild(header);
+      }
+      for (const job of group.jobs) {
       const item = document.createElement('div');
       item.className = 'cron-item';
       item.id = 'cron-' + job.id;
@@ -438,6 +460,7 @@ async function loadCrons(animate) {
       item.onclick = () => openCronDetail(job.id, item);
       if (_currentCronDetail && _currentCronDetail.id === job.id) item.classList.add('active');
       box.appendChild(item);
+      }
     }
     // Re-render current detail with fresh data if we have one and we're not in a form
     if (_currentCronDetail && _cronMode !== 'create' && _cronMode !== 'edit') {
@@ -472,6 +495,7 @@ function _renderCronDetail(job){
   const script = job.script || '';
   const profileLabel = _cronProfileLabel(job.profile);
   const profileTitle = _cronProfileTitle(job.profile);
+  const assistantTag = job.assistant_managed ? `<div class="detail-row"><div class="detail-row-label">Assistant</div><div class="detail-row-value"><span class="detail-badge active">Managed</span></div></div>` : '';
   const lastError = job.last_error ? `<div class="detail-row"><div class="detail-row-label">${esc(t('error_prefix').replace(/:\s*$/,''))}</div><div class="detail-row-value" style="color:var(--accent-text)">${esc(job.last_error)}</div></div>` : '';
   const attention = status.state === 'needs_attention' || status.state === 'schedule_error';
   const croniterHint = job.last_error && /croniter/i.test(job.last_error)
@@ -494,13 +518,14 @@ function _renderCronDetail(job){
       <div class="detail-card">
         <div class="detail-card-title">${esc(t('cron_status_active').replace(/./,c=>c.toUpperCase()))}</div>
         <div class="detail-row"><div class="detail-row-label">Status</div><div class="detail-row-value"><span class="detail-badge ${status.detailClass}">${esc(status.label)}</span></div></div>
-        <div class="detail-row"><div class="detail-row-label">Schedule</div><div class="detail-row-value"><code>${esc(schedule)}</code></div></div>
+        <div class="detail-row"><div class="detail-row-label">${esc(t('cron_schedule_label'))}</div><div class="detail-row-value"><code>${esc(schedule)}</code></div></div>
         <div class="detail-row"><div class="detail-row-label">${esc(t('cron_next'))}</div><div class="detail-row-value">${esc(nextRun)}</div></div>
         <div class="detail-row"><div class="detail-row-label">${esc(t('cron_last'))}</div><div class="detail-row-value">${esc(lastRun)}</div></div>
         <div class="detail-row"><div class="detail-row-label">Deliver</div><div class="detail-row-value">${esc(deliver)}</div></div>
         <div class="detail-row"><div class="detail-row-label">Mode</div><div class="detail-row-value"><span class="detail-badge" id="cronJobMode">${esc(cronJobMode)}</span></div></div>
         ${isNoAgent ? `<div class="detail-row"><div class="detail-row-label">No-agent script</div><div class="detail-row-value"><code>${esc(script || '—')}</code></div></div>` : ''}
         <div class="detail-row"><div class="detail-row-label">${esc(t('cron_profile_label') || 'Profile')}</div><div class="detail-row-value"><span class="detail-badge active" title="${esc(profileTitle)}">${esc(profileLabel)}</span></div></div>
+        ${assistantTag}
         <div class="detail-row"><div class="detail-row-label">Skills</div><div class="detail-row-value">${esc(skills)}</div></div>
         ${lastError}
       </div>
@@ -3451,6 +3476,462 @@ async function submitMemorySave() {
     _renderMemoryDetail(_currentMemorySection);
   } catch(e) {
     if (errEl) { errEl.textContent = t('error_prefix') + e.message; errEl.style.display = ''; }
+  }
+}
+
+// ── My Assistant panel ──────────────────────────────────────────────────────
+
+function _assistantScheduleDefaults(cfg) {
+  const assistant = (cfg && cfg.assistant) || {};
+  return {
+    memory_injection: assistant.memory_injection !== false,
+    default_deliver: assistant.default_deliver === 'teams' ? 'teams' : 'local',
+  };
+}
+
+function _assistantScheduleModeButtons() {
+  return Array.from(document.querySelectorAll('#assistantScheduleModes .assistant-mode-btn'));
+}
+
+function setAssistantScheduleMode(mode) {
+  const next = ['daily', 'weekly', 'interval', 'custom'].includes(mode) ? mode : 'daily';
+  _assistantScheduleMode = next;
+  _assistantScheduleModeButtons().forEach(btn => btn.classList.toggle('active', btn.dataset.mode === next));
+  const panes = {
+    daily: $('assistantScheduleDaily'),
+    weekly: $('assistantScheduleWeekly'),
+    interval: $('assistantScheduleInterval'),
+    custom: $('assistantScheduleCustom'),
+  };
+  Object.entries(panes).forEach(([key, el]) => {
+    if (el) el.style.display = key === next ? '' : 'none';
+  });
+}
+
+function _assistantScheduleExpressionFromForm() {
+  const dailyTime = $('assistantDailyTime');
+  const weeklyDow = $('assistantWeeklyDow');
+  const weeklyTime = $('assistantWeeklyTime');
+  const intervalValue = $('assistantIntervalValue');
+  const intervalUnit = $('assistantIntervalUnit');
+  const customSchedule = $('assistantCustomSchedule');
+  const [hour = '09', minute = '00'] = String((dailyTime && dailyTime.value) || '09:00').split(':');
+  const hh = String(parseInt(hour, 10) || 0);
+  const mm = String(parseInt(minute, 10) || 0);
+  if (_assistantScheduleMode === 'weekly') {
+    const [wh = '09', wm = '00'] = String((weeklyTime && weeklyTime.value) || '09:00').split(':');
+    const dow = String((weeklyDow && weeklyDow.value) || '1');
+    return `${parseInt(wm, 10) || 0} ${parseInt(wh, 10) || 0} * * ${dow}`;
+  }
+  if (_assistantScheduleMode === 'interval') {
+    const value = Math.max(1, parseInt((intervalValue && intervalValue.value) || '1', 10) || 1);
+    const unit = (intervalUnit && intervalUnit.value) || 'minutes';
+    if (unit === 'hours') return `0 */${value} * * *`;
+    if (unit === 'days') return `0 0 */${value} * *`;
+    return `*/${value} * * * *`;
+  }
+  if (_assistantScheduleMode === 'custom') {
+    return String((customSchedule && customSchedule.value) || '').trim();
+  }
+  return `${parseInt(mm, 10) || 0} ${parseInt(hh, 10) || 0} * * *`;
+}
+
+function _assistantScheduleModeFromExpression(expr) {
+  const schedule = String(expr || '').trim();
+  if (!schedule) return 'daily';
+  if (/^\*\/\d+\s+\*\s+\*\s+\*\s+\*$/.test(schedule) || /^0\s+\*\/\d+\s+\*\s+\*\s+\*$/.test(schedule) || /^0\s+0\s+\*\/\d+\s+\*\s+\*$/.test(schedule)) {
+    return 'interval';
+  }
+  if (/^\d+\s+\d+\s+\*\s+\*\s+\d+$/.test(schedule)) return 'weekly';
+  if (/^\d+\s+\d+\s+\*\s+\*\s+\*$/.test(schedule)) return 'daily';
+  return 'custom';
+}
+
+function _assistantJobScheduleFields(job) {
+  const schedule = String((job && (job.schedule_display || (job.schedule && job.schedule.expression) || job.schedule || '')) || '').trim();
+  const mode = _assistantScheduleModeFromExpression(schedule);
+  const parts = schedule.split(/\s+/);
+  if (mode === 'weekly' && parts.length >= 5) {
+    return { mode, time: `${String(parts[1]).padStart(2, '0')}:${String(parts[0]).padStart(2, '0')}`, dow: String(parts[4]) };
+  }
+  if (mode === 'daily' && parts.length >= 5) {
+    return { mode, time: `${String(parts[1]).padStart(2, '0')}:${String(parts[0]).padStart(2, '0')}` };
+  }
+  if (mode === 'interval') {
+    let match = schedule.match(/^\*\/(\d+)\s+\*\s+\*\s+\*\s+\*$/);
+    if (match) return { mode, value: match[1], unit: 'minutes' };
+    match = schedule.match(/^0\s+\*\/(\d+)\s+\*\s+\*\s+\*$/);
+    if (match) return { mode, value: match[1], unit: 'hours' };
+    match = schedule.match(/^0\s+0\s+\*\/(\d+)\s+\*\s+\*$/);
+    if (match) return { mode, value: match[1], unit: 'days' };
+  }
+  return { mode, schedule };
+}
+
+function _assistantSetFormFromJob(job) {
+  const isAssistant = !!(job && job.assistant_managed);
+  const selected = job ? String(job.id || '') : '';
+  _assistantSelectedJobId = selected;
+  const idEl = $('assistantRoutineId');
+  const nameEl = $('assistantRoutineName');
+  const promptEl = $('assistantRoutinePrompt');
+  const memoryEl = $('assistantMemoryInjection');
+  const deliverEl = $('assistantDeliverTeams');
+  const customScheduleEl = $('assistantCustomSchedule');
+  const dailyTimeEl = $('assistantDailyTime');
+  const weeklyDowEl = $('assistantWeeklyDow');
+  const weeklyTimeEl = $('assistantWeeklyTime');
+  const intervalValueEl = $('assistantIntervalValue');
+  const intervalUnitEl = $('assistantIntervalUnit');
+  if (idEl) idEl.value = selected;
+  if (nameEl) nameEl.value = (job && job.name) || '';
+  if (promptEl) promptEl.value = (job && job.prompt) || '';
+  const defaults = _assistantScheduleDefaults(_assistantData && _assistantData.config);
+  if (memoryEl) memoryEl.checked = job && job.assistant_memory_injection !== undefined ? !!job.assistant_memory_injection : defaults.memory_injection;
+  if (deliverEl) deliverEl.checked = (job && job.deliver) === 'teams' || (!job && defaults.default_deliver === 'teams');
+  const fields = _assistantJobScheduleFields(job || {});
+  _assistantScheduleMode = fields.mode || 'daily';
+  setAssistantScheduleMode(_assistantScheduleMode);
+  if (fields.mode === 'weekly') {
+    if (weeklyDowEl && fields.dow !== undefined) weeklyDowEl.value = String(fields.dow);
+    if (weeklyTimeEl && fields.time) weeklyTimeEl.value = fields.time;
+  } else if (fields.mode === 'interval') {
+    if (intervalValueEl && fields.value) intervalValueEl.value = fields.value;
+    if (intervalUnitEl && fields.unit) intervalUnitEl.value = fields.unit;
+  } else if (fields.mode === 'custom') {
+    if (customScheduleEl) customScheduleEl.value = fields.schedule || '';
+  } else if (dailyTimeEl && fields.time) {
+    dailyTimeEl.value = fields.time;
+  }
+  if (isAssistant && nameEl) {
+    nameEl.placeholder = 'Assistant routine';
+  }
+  const list = document.querySelectorAll('.assistant-routine-item');
+  list.forEach(el => el.classList.toggle('active', el.dataset.jobId === selected));
+}
+
+function copyAssistantRoutine(jobId) {
+  const job = _assistantJobs.find(j => String(j.id) === String(jobId));
+  if (!job) return;
+  openAssistantRoutineForm({
+    ...job,
+    id: '',
+    assistant_managed: true,
+    name: (job.name || 'Routine') + ' (copy)',
+  });
+}
+
+function openAssistantRoutineForm(job) {
+  _assistantSetFormFromJob(job || null);
+  const promptEl = $('assistantRoutinePrompt');
+  if (promptEl) promptEl.focus();
+}
+
+function _assistantSortedJobs(jobs) {
+  return [...(jobs || [])].sort((a, b) => {
+    const ap = !!(a && a.assistant_managed);
+    const bp = !!(b && b.assistant_managed);
+    if (ap !== bp) return ap ? -1 : 1;
+    return String(a && a.name || '').localeCompare(String(b && b.name || ''));
+  });
+}
+
+function _renderAssistantMemory(data) {
+  const memoryEl = $('assistantMemoryMd');
+  const userEl = $('assistantUserMd');
+  const meta = $('assistantMemoryMeta');
+  if (memoryEl) memoryEl.value = data && data.memory ? data.memory : '';
+  if (userEl) userEl.value = data && data.user ? data.user : '';
+  if (meta) {
+    const parts = [];
+    if (data && data.memory_mtime) parts.push('MEMORY.md ' + new Date(data.memory_mtime * 1000).toLocaleString());
+    if (data && data.user_mtime) parts.push('USER.md ' + new Date(data.user_mtime * 1000).toLocaleString());
+    meta.textContent = parts.length ? parts.join(' · ') : 'No memory saved';
+  }
+}
+
+function _renderAssistantTeamsStatus(gateway) {
+  const statusEl = $('assistantTeamsStatus');
+  const configured = !!(gateway && gateway.configured && Array.isArray(gateway.platforms) && gateway.platforms.some(p => (p && p.name) === 'teams'));
+  _assistantTeamsConfigured = configured;
+  if (statusEl) {
+    statusEl.textContent = configured ? 'Teams configured' : 'Teams not configured';
+  }
+}
+
+function _renderAssistantCockpit(payload) {
+  const draftEl = $('assistantCockpitDraft');
+  const metaEl = $('assistantCockpitMeta');
+  if (!draftEl && !metaEl) return;
+  const kind = String((payload && payload.kind) || 'today');
+  _assistantCockpitKind = ['today', 'summary', 'stale'].includes(kind) ? kind : 'today';
+  const text = String((payload && payload.text) || '');
+  if (draftEl && text) draftEl.value = text;
+  const parts = [];
+  if (payload && payload.title) parts.push(String(payload.title));
+  if (payload && Number.isFinite(Number(payload.job_count))) parts.push(`${Number(payload.job_count)} routines`);
+  if (payload && payload.generated_at) {
+    const dt = new Date(Number(payload.generated_at) * 1000);
+    if (!Number.isNaN(dt.getTime())) parts.push(dt.toLocaleString());
+  }
+  if (metaEl) metaEl.textContent = parts.length ? parts.join(' · ') : 'Generate a draft to start.';
+}
+
+function _assistantRoutineScheduleLabel(job) {
+  const schedule = String((job && (job.schedule_display || (job.schedule && job.schedule.expression) || job.schedule || '')) || '').trim();
+  return schedule || '—';
+}
+
+function _renderAssistantRoutines(jobs) {
+  _assistantJobs = _assistantSortedJobs(jobs || []);
+  const list = $('assistantRoutineList');
+  const meta = $('assistantRoutinesMeta');
+  if (!list) return;
+  if (meta) meta.textContent = _assistantJobs.length ? `${_assistantJobs.length} jobs` : 'No jobs';
+  if (!_assistantJobs.length) {
+    list.innerHTML = `<div style="color:var(--muted);font-size:12px;padding:4px 2px">No routines yet.</div>`;
+    return;
+  }
+  list.innerHTML = '';
+  for (const job of _assistantJobs) {
+    const item = document.createElement('div');
+    item.className = 'assistant-routine-item';
+    item.dataset.jobId = String(job.id || '');
+    const assistant = !!job.assistant_managed;
+    const badge = assistant ? '<span class="assistant-badge is-on">Assistant</span>' : '<span class="assistant-badge">Task</span>';
+    const deliver = job.deliver || 'local';
+    const schedule = _assistantRoutineScheduleLabel(job);
+    const jobIdJs = JSON.stringify(String(job.id || ''));
+    item.innerHTML = `
+      <div class="assistant-routine-item-main">
+        <div class="assistant-routine-name">${esc(job.name || '(unnamed)')}</div>
+        <div class="assistant-routine-meta">
+          <span>${esc(schedule)}</span>
+          <span>·</span>
+          <span>${esc(deliver)}</span>
+          ${badge}
+        </div>
+      </div>
+      <div class="assistant-routine-actions">
+        <button type="button" class="panel-head-btn has-tooltip" data-tooltip="Run once" aria-label="Run once" onclick="event.stopPropagation(); runAssistantRoutine(${jobIdJs})"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="5 3 19 12 5 21 5 3"/></svg></button>
+        <button type="button" class="panel-head-btn has-tooltip" data-tooltip="${assistant ? 'Unlink' : 'Link'}" aria-label="${assistant ? 'Unlink' : 'Link'}" onclick="event.stopPropagation(); toggleAssistantRoutine(${jobIdJs}, ${assistant ? 'false' : 'true'})"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 13a5 5 0 0 1 7 0l1 1a5 5 0 0 1-7 7l-1-1"/><path d="M14 11a5 5 0 0 0-7 0l-1 1a5 5 0 0 0 7 7l1-1"/></svg></button>
+        <button type="button" class="panel-head-btn has-tooltip" data-tooltip="Copy" aria-label="Copy" onclick="event.stopPropagation(); copyAssistantRoutine(${jobIdJs})"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button>
+      </div>`;
+    item.onclick = () => _assistantSetFormFromJob(job);
+    if (String(job.id) === String(_assistantSelectedJobId)) item.classList.add('active');
+    list.appendChild(item);
+  }
+}
+
+async function loadAssistant(force) {
+  const refreshBtn = $('btnAssistantRefresh');
+  if (force && refreshBtn) {
+    refreshBtn.style.opacity = '0.5';
+    refreshBtn.disabled = true;
+  }
+  try {
+    const [memory, crons, cfg, gateway] = await Promise.all([
+      api('/api/memory'),
+      api('/api/crons'),
+      api('/api/profile/config'),
+      api('/api/gateway/status').catch(() => null),
+    ]);
+    _assistantData = {
+      memory: memory || {},
+      config: cfg || {},
+      gateway: gateway || null,
+      cockpit: (_assistantData && _assistantData.cockpit) || null,
+    };
+    const cfgDefaults = _assistantScheduleDefaults(cfg || {});
+    const cfgMem = $('assistantConfigMemoryInjection');
+    if (cfgMem) cfgMem.checked = cfgDefaults.memory_injection;
+    const cfgTeams = $('assistantConfigDefaultTeams');
+    if (cfgTeams) cfgTeams.checked = cfgDefaults.default_deliver === 'teams';
+    _renderAssistantMemory(memory || {});
+    _renderAssistantTeamsStatus(gateway || null);
+    _renderAssistantCockpit(_assistantData.cockpit || {});
+    _renderAssistantRoutines((crons && crons.jobs) || []);
+    if (!_assistantSelectedJobId || !_assistantJobs.find(j => String(j.id) === String(_assistantSelectedJobId))) {
+      const first = _assistantJobs.find(j => j.assistant_managed) || _assistantJobs[0] || null;
+      _assistantSetFormFromJob(first);
+    } else {
+      _assistantSetFormFromJob(_assistantJobs.find(j => String(j.id) === String(_assistantSelectedJobId)) || null);
+    }
+    const memBox = $('assistantMemoryMd');
+    if (memBox) memBox.disabled = false;
+    const userBox = $('assistantUserMd');
+    if (userBox) userBox.disabled = false;
+    const draftBox = $('assistantCockpitDraft');
+    const hasDraft = draftBox && String(draftBox.value || '').trim();
+    if (!hasDraft || force) await generateAssistantCockpit(_assistantCockpitKind || 'today', {silent: true});
+  } catch(e) {
+    const list = $('assistantRoutineList');
+    if (list) list.innerHTML = `<div style="color:var(--error);font-size:12px;padding:4px 2px">Failed to load assistant view: ${esc(e.message || String(e))}</div>`;
+  } finally {
+    if (force && refreshBtn) {
+      refreshBtn.style.opacity = '';
+      refreshBtn.disabled = false;
+    }
+  }
+}
+
+async function generateAssistantCockpit(kind = 'today', opts = {}) {
+  const mode = ['today', 'summary', 'stale'].includes(kind) ? kind : 'today';
+  const metaEl = $('assistantCockpitMeta');
+  const silent = !!(opts && opts.silent);
+  if (metaEl) metaEl.textContent = 'Generating...';
+  try {
+    const payload = await api(`/api/assistant/cockpit?kind=${encodeURIComponent(mode)}`);
+    _assistantData = _assistantData || {};
+    _assistantData.cockpit = payload || {kind: mode};
+    _renderAssistantCockpit(_assistantData.cockpit);
+    if (!silent) showToast('Draft generated');
+  } catch (e) {
+    if (metaEl) metaEl.textContent = 'Draft generation failed';
+    if (!silent) showToast('Generate failed: ' + e.message, 4000);
+  }
+}
+
+function applyAssistantDraftToTeams() {
+  const draftEl = $('assistantCockpitDraft');
+  const teamsEl = $('assistantTeamsMessage');
+  const text = String((draftEl && draftEl.value) || '').trim();
+  if (!text) {
+    showToast('No draft to copy', 3000);
+    return;
+  }
+  if (teamsEl) {
+    teamsEl.value = text;
+    teamsEl.focus();
+  }
+  showToast('Draft copied to Teams message');
+}
+
+async function saveAssistantMemory() {
+  const memoryEl = $('assistantMemoryMd');
+  const userEl = $('assistantUserMd');
+  const err = $('assistantRoutineError');
+  if (!memoryEl || !userEl) return;
+  if (err) err.style.display = 'none';
+  try {
+    await api('/api/memory/write', {method:'POST', body: JSON.stringify({section:'memory', content: memoryEl.value})});
+    await api('/api/memory/write', {method:'POST', body: JSON.stringify({section:'user', content: userEl.value})});
+    showToast('Memory saved');
+    await loadAssistant(true);
+  } catch(e) {
+    if (err) {
+      err.textContent = t('error_prefix') + e.message;
+      err.style.display = '';
+    } else {
+      showToast('Save failed: ' + e.message, 4000);
+    }
+  }
+}
+
+async function saveAssistantConfig() {
+  const err = $('assistantRoutineError');
+  const assistant = {
+    memory_injection: !!(($('assistantConfigMemoryInjection') || {}).checked),
+    default_deliver: (($('assistantConfigDefaultTeams') || {}).checked) ? 'teams' : 'local',
+  };
+  try {
+    if (err) err.style.display = 'none';
+    const saved = await api('/api/profile/config', {method:'POST', body: JSON.stringify({assistant})});
+    _assistantData = _assistantData || {};
+    _assistantData.config = saved || {assistant};
+    showToast('Assistant defaults saved');
+    await loadAssistant(true);
+  } catch(e) {
+    if (err) { err.textContent = t('error_prefix') + e.message; err.style.display = ''; }
+    else showToast('Save failed: ' + e.message, 4000);
+  }
+}
+
+function _assistantRoutinePayload() {
+  const name = String(($('assistantRoutineName') || {}).value || '').trim();
+  const prompt = String(($('assistantRoutinePrompt') || {}).value || '').trim();
+  const deliverTeams = !!(($('assistantDeliverTeams') || {}).checked);
+  const memoryInjection = !!(($('assistantMemoryInjection') || {}).checked);
+  const schedule = _assistantScheduleExpressionFromForm();
+  return {
+    id: String(($('assistantRoutineId') || {}).value || '').trim(),
+    name,
+    prompt,
+    schedule,
+    deliver: deliverTeams ? 'teams' : 'local',
+    assistant_managed: true,
+    assistant_memory_injection: memoryInjection,
+  };
+}
+
+async function saveAssistantRoutine() {
+  const err = $('assistantRoutineError');
+  const payload = _assistantRoutinePayload();
+  if (!payload.schedule) {
+    if (err) { err.textContent = 'Schedule is required'; err.style.display = ''; }
+    return;
+  }
+  if (!payload.prompt) {
+    if (err) { err.textContent = 'Prompt is required'; err.style.display = ''; }
+    return;
+  }
+  try {
+    if (err) err.style.display = 'none';
+    if (payload.id) {
+      await api('/api/crons/update', {method:'POST', body: JSON.stringify({job_id: payload.id, name: payload.name, prompt: payload.prompt, schedule: payload.schedule, deliver: payload.deliver, assistant_managed: true, assistant_memory_injection: payload.assistant_memory_injection})});
+    } else {
+      const res = await api('/api/crons/create', {method:'POST', body: JSON.stringify({name: payload.name, prompt: payload.prompt, schedule: payload.schedule, deliver: payload.deliver, assistant_managed: true, assistant_memory_injection: payload.assistant_memory_injection})});
+      if (res && (res.job || res.id)) {
+        _assistantSelectedJobId = String((res.job && res.job.id) || res.id || '');
+      }
+    }
+    showToast('Routine saved');
+    await loadAssistant(true);
+  } catch(e) {
+    if (err) { err.textContent = t('error_prefix') + e.message; err.style.display = ''; }
+  }
+}
+
+async function runAssistantRoutine(jobId) {
+  if (!jobId) return;
+  try {
+    await api('/api/crons/run', {method:'POST', body: JSON.stringify({job_id: jobId})});
+    showToast('Routine started');
+  } catch(e) {
+    showToast('Run failed: ' + e.message, 4000);
+  }
+}
+
+async function runSelectedAssistantRoutine() {
+  if (_assistantSelectedJobId) return runAssistantRoutine(_assistantSelectedJobId);
+}
+
+async function toggleAssistantRoutine(jobId, enabled) {
+  if (!jobId) return;
+  try {
+    await api('/api/crons/update', {method:'POST', body: JSON.stringify({job_id: jobId, assistant_managed: !!enabled})});
+    await loadAssistant(true);
+  } catch(e) {
+    showToast('Update failed: ' + e.message, 4000);
+  }
+}
+
+async function sendAssistantTeamsMessage(kind) {
+  const ta = $('assistantTeamsMessage');
+  const message = String((ta && ta.value) || '').trim();
+  const text = message || (kind === 'test' ? 'My Assistant test message' : '');
+  if (!text) return;
+  if (!_assistantTeamsConfigured) {
+    showToast('Teams is not configured', 4000);
+    return;
+  }
+  try {
+    const result = await api('/api/assistant/send', {method:'POST', body: JSON.stringify({message: text})});
+    if (result && result.ok === false) throw new Error(result.error || 'Teams send failed');
+    if (kind === 'test') showToast('Teams test sent');
+    else showToast('Teams message sent');
+  } catch(e) {
+    showToast('Teams send failed: ' + e.message, 4000);
   }
 }
 
