@@ -49,6 +49,7 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             profile_name TEXT NOT NULL UNIQUE,
             password_hash TEXT NOT NULL,
             password_salt TEXT NOT NULL,
+            trace_audit INTEGER NOT NULL DEFAULT 0,
             created_at REAL NOT NULL,
             updated_at REAL NOT NULL
         )
@@ -94,6 +95,14 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         "CREATE INDEX IF NOT EXISTS idx_api_tokens_user_id ON api_tokens(user_id)"
     )
 
+    # Migration: add trace_audit column if missing (existing databases)
+    try:
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(users)").fetchall()}
+        if "trace_audit" not in cols:
+            conn.execute("ALTER TABLE users ADD COLUMN trace_audit INTEGER NOT NULL DEFAULT 0")
+    except sqlite3.Error:
+        pass
+
 
 def _hash_token(raw_token: str) -> str:
     return hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
@@ -120,6 +129,7 @@ def _user_from_row(row: sqlite3.Row | None) -> dict | None:
         "role": str(row["role"]),
         "status": str(row["status"]),
         "profile_name": str(row["profile_name"]),
+        "trace_audit": int(row["trace_audit"]) if "trace_audit" in row.keys() else 0,
         "created_at": float(row["created_at"]),
         "updated_at": float(row["updated_at"]),
     }
@@ -434,6 +444,7 @@ def verify_auth_session(raw_token: str) -> dict | None:
                 u.role AS role,
                 u.status AS status,
                 u.profile_name AS profile_name,
+                u.trace_audit AS trace_audit,
                 u.created_at AS created_at,
                 u.updated_at AS updated_at
             FROM auth_sessions s
@@ -590,6 +601,7 @@ def verify_api_token(raw_token: str) -> dict | None:
                 u.role AS role,
                 u.status AS status,
                 u.profile_name AS profile_name,
+                u.trace_audit AS trace_audit,
                 u.created_at AS created_at,
                 u.updated_at AS updated_at
             FROM api_tokens t

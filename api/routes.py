@@ -526,6 +526,7 @@ def _cron_job_for_api(job: dict) -> dict:
     """
     payload = dict(job or {})
     payload.setdefault("profile", None)
+    payload.setdefault("assistant_managed", False)
     return payload
 
 
@@ -556,6 +557,22 @@ def _normalize_cron_profile_value(value) -> str | None:
     if profile not in _available_cron_profile_names():
         raise ValueError(f"Unknown profile: {profile}")
     return profile
+
+
+def _coerce_bool(value, default=False) -> bool:
+    if value is None:
+        return bool(default)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in {"1", "true", "yes", "on"}:
+            return True
+        if text in {"0", "false", "no", "off", ""}:
+            return False
+    return bool(value)
 
 
 def _normalize_cron_profile_for_request(handler, value) -> str | None:
@@ -592,13 +609,296 @@ def _profile_home_for_cron_job(job: dict):
     return get_hermes_home_for_profile(raw)
 
 
+def _assistant_memory_injection_enabled(job: dict, execution_profile_home):
+    if not isinstance(job, dict) or not job.get("assistant_managed"):
+        return False
+    if "assistant_memory_injection" in job:
+        return _coerce_bool(job.get("assistant_memory_injection"), True)
+    try:
+        from api.profiles import read_profile_config
+
+        cfg = read_profile_config(execution_profile_home)
+        assistant_cfg = cfg.get("assistant", {})
+        if isinstance(assistant_cfg, dict) and "memory_injection" in assistant_cfg:
+            return _coerce_bool(assistant_cfg.get("memory_injection"), True)
+    except Exception:
+        logger.debug("Failed to read assistant config for memory injection", exc_info=True)
+    return True
+
+
+def _assistant_read_memory_sections(execution_profile_home):
+    home = Path(execution_profile_home) if execution_profile_home else None
+    if home is None:
+        try:
+            from api.profiles import get_active_hermes_home
+
+            home = get_active_hermes_home()
+        except Exception:
+            home = None
+    if home is None:
+        return "", ""
+
+    memory = ""
+    user = ""
+    try:
+        mem_dir = home / "memories"
+        mem_file = mem_dir / "MEMORY.md"
+        user_file = mem_dir / "USER.md"
+        if mem_file.exists():
+            memory = mem_file.read_text(encoding="utf-8", errors="replace").strip()
+        if user_file.exists():
+            user = user_file.read_text(encoding="utf-8", errors="replace").strip()
+    except Exception:
+        logger.debug("Failed to read assistant memory files from %s", home, exc_info=True)
+    return memory, user
+
+
+def _assistant_memory_context_snippet(text: str, *, max_lines: int = 2, max_chars: int = 140) -> str:
+    if not text:
+        return ""
+    lines = [ln.strip() for ln in str(text).splitlines() if ln.strip()]
+    snippet = " ".join(lines[:max_lines]).strip()
+    if len(snippet) <= max_chars:
+        return snippet
+    return snippet[: max_chars - 1].rstrip() + "…"
+
+
+def _assistant_job_last_run_ts(job: dict):
+    import datetime
+
+    value = (job or {}).get("last_run_at")
+    if value in (None, ""):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        return datetime.datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp()
+    except Exception:
+        pass
+    try:
+        return float(text)
+    except Exception:
+        return None
+
+
+def _assistant_job_schedule_label(job: dict) -> str:
+    if not isinstance(job, dict):
+        return "—"
+    if job.get("schedule_display"):
+        return str(job.get("schedule_display"))
+    schedule = job.get("schedule")
+    if isinstance(schedule, dict):
+        if schedule.get("expression"):
+            return str(schedule.get("expression"))
+        if schedule.get("kind"):
+            return str(schedule.get("kind"))
+    if schedule:
+        return str(schedule)
+    return "—"
+
+
+def _assistant_job_enabled(job: dict) -> bool:
+    if not isinstance(job, dict):
+        return False
+    if job.get("enabled") is False:
+        return False
+    if _coerce_bool(job.get("paused"), False):
+        return False
+    status = str(job.get("status") or "").strip().lower()
+    if status == "paused":
+        return False
+    return True
+
+
+def _assistant_candidate_jobs(jobs) -> list[dict]:
+    pool = [dict(job or {}) for job in (jobs or []) if isinstance(job, dict)]
+    assistant = [job for job in pool if job.get("assistant_managed")]
+    return assistant if assistant else pool
+
+
+def _assistant_build_today_plan(jobs: list[dict], memory_text: str, user_text: str, now_ts: float) -> str:
+    focus = _assistant_memory_context_snippet(user_text) or _assistant_memory_context_snippet(memory_text)
+    enabled = [job for job in jobs if _assistant_job_enabled(job)]
+    enabled.sort(key=lambda job: str(job.get("name") or "").lower())
+    lines = [
+        "# Today Plan (Draft)",
+        f"Date: {time.strftime('%Y-%m-%d', time.localtime(now_ts))}",
+        "",
+    ]
+    if focus:
+        lines.append(f"Focus: {focus}")
+        lines.append("")
+    lines.append("Top routines:")
+    if not enabled:
+        lines.append("- [ ] No enabled routines yet.")
+    else:
+        for job in enabled[:6]:
+            name = str(job.get("name") or "(unnamed)")
+            schedule = _assistant_job_schedule_label(job)
+            status = str(job.get("last_status") or "never")
+            lines.append(f"- [ ] {name} ({schedule}, last: {status})")
+    lines.append("")
+    lines.append("Execution notes:")
+    lines.append("- Keep Teams updates as editable drafts before sending.")
+    return "\n".join(lines).strip()
+
+
+def _assistant_build_day_summary(jobs: list[dict], now_ts: float) -> str:
+    today_key = time.strftime("%Y-%m-%d", time.localtime(now_ts))
+    success_states = {"ok", "success", "completed", "done"}
+    ran_today = []
+    for job in jobs:
+        ts = _assistant_job_last_run_ts(job)
+        if ts is None:
+            continue
+        if time.strftime("%Y-%m-%d", time.localtime(ts)) == today_key:
+            ran_today.append(job)
+    ran_today.sort(key=lambda job: str(job.get("name") or "").lower())
+
+    success = []
+    failed = []
+    for job in ran_today:
+        status = str(job.get("last_status") or "unknown").strip().lower()
+        if status in success_states:
+            success.append(job)
+        else:
+            failed.append(job)
+
+    lines = [
+        "# End-of-Day Summary (Draft)",
+        f"Date: {today_key}",
+        "",
+        f"Runs today: {len(ran_today)}  |  Success: {len(success)}  |  Attention: {len(failed)}",
+        "",
+        "Completed:",
+    ]
+    if not success:
+        lines.append("- None recorded yet.")
+    else:
+        for job in success[:6]:
+            lines.append(f"- {str(job.get('name') or '(unnamed)')}")
+    lines.append("")
+    lines.append("Needs attention:")
+    if not failed:
+        lines.append("- None.")
+    else:
+        for job in failed[:6]:
+            status = str(job.get("last_status") or "unknown")
+            lines.append(f"- {str(job.get('name') or '(unnamed)')} (status: {status})")
+    lines.append("")
+    lines.append("Next:")
+    lines.append("- Review attention items and update tomorrow's priorities.")
+    return "\n".join(lines).strip()
+
+
+def _assistant_build_stale_reminders(jobs: list[dict], now_ts: float) -> str:
+    success_states = {"ok", "success", "completed", "done"}
+    stale_items = []
+    for job in jobs:
+        if not _assistant_job_enabled(job):
+            continue
+        name = str(job.get("name") or "(unnamed)")
+        ts = _assistant_job_last_run_ts(job)
+        status = str(job.get("last_status") or "").strip().lower()
+        if ts is None:
+            stale_items.append((name, "never run"))
+            continue
+        idle_seconds = max(0.0, now_ts - ts)
+        idle_days = int(idle_seconds // 86400)
+        if idle_seconds >= 3 * 86400:
+            stale_items.append((name, f"idle for {idle_days}d"))
+            continue
+        if status and status not in success_states and idle_seconds >= 12 * 3600:
+            stale_items.append((name, f"status is '{status}'"))
+
+    stale_items.sort(key=lambda item: item[0].lower())
+    lines = [
+        "# Stale Routine Reminders",
+        f"Generated: {time.strftime('%Y-%m-%d %H:%M', time.localtime(now_ts))}",
+        "",
+    ]
+    if not stale_items:
+        lines.append("- No stale routines detected.")
+    else:
+        for name, reason in stale_items[:12]:
+            lines.append(f"- [ ] {name}: {reason}")
+    lines.append("")
+    lines.append("Follow-up:")
+    lines.append("- Tune schedule, fix blockers, or disable outdated routines.")
+    return "\n".join(lines).strip()
+
+
+def _assistant_cockpit_payload(kind: str, jobs, execution_profile_home):
+    normalized = str(kind or "today").strip().lower()
+    if normalized not in {"today", "summary", "stale"}:
+        normalized = "today"
+    now_ts = time.time()
+    memory, user = _assistant_read_memory_sections(execution_profile_home)
+    candidates = _assistant_candidate_jobs(jobs)
+    if normalized == "summary":
+        title = "End-of-Day Summary"
+        text = _assistant_build_day_summary(candidates, now_ts)
+    elif normalized == "stale":
+        title = "Stale Routine Reminders"
+        text = _assistant_build_stale_reminders(candidates, now_ts)
+    else:
+        title = "Today Plan"
+        text = _assistant_build_today_plan(candidates, memory, user, now_ts)
+    return {
+        "ok": True,
+        "kind": normalized,
+        "title": title,
+        "text": text,
+        "generated_at": now_ts,
+        "job_count": len(candidates),
+    }
+
+
+def _assistant_prompt_prefix(job: dict, execution_profile_home) -> str:
+    if not _assistant_memory_injection_enabled(job, execution_profile_home):
+        return ""
+    memory, user = _assistant_read_memory_sections(execution_profile_home)
+    parts = [
+        "You are a profile-bound assistant routine.",
+        "Read the following memory before answering:",
+    ]
+    if memory:
+        parts.append("## MEMORY.md\n" + memory)
+    if user:
+        parts.append("## USER.md\n" + user)
+    return "\n\n".join(parts).strip()
+
+
+def _handle_assistant_cockpit(handler, parsed):
+    qs = parse_qs(parsed.query)
+    kind = qs.get("kind", ["today"])[0]
+    try:
+        from cron.jobs import list_jobs
+        from api.profiles import get_active_hermes_home
+
+        jobs = list_jobs(include_disabled=True)
+        profile_home = get_active_hermes_home()
+        payload = _assistant_cockpit_payload(kind, jobs, profile_home)
+        return j(handler, payload)
+    except Exception as e:
+        return bad(handler, f"Failed to build assistant cockpit draft: {e}", 500)
+
+
 def _cron_job_subprocess_main(job, execution_profile_home, result_queue):
     """Run one cron job inside a child process pinned to a profile home."""
     try:
         def _run():
             from cron.scheduler import run_job
 
-            return run_job(job)
+            next_job = dict(job or {})
+            prefix = _assistant_prompt_prefix(next_job, execution_profile_home)
+            if prefix:
+                prompt = str(next_job.get("prompt") or "").strip()
+                next_job["prompt"] = f"{prefix}\n\n{prompt}" if prompt else prefix
+            return run_job(next_job)
 
         if execution_profile_home is None:
             result = _run()
@@ -3190,6 +3490,212 @@ def handle_get(handler, parsed) -> bool:
             return bad(handler, "Artifact not found", 404)
         return j(handler, {"success": True, "data": artifact})
 
+    # ── Workflow Definitions API (GET) ──
+    _TRACE_DEFS_PATTERN = re.compile(r"^/api/workflow/definitions(/([^/]+)(/.*)?)?$")
+    _defs_match = _TRACE_DEFS_PATTERN.match(parsed.path or "")
+    if _defs_match:
+        workflow_id = _defs_match.group(2)
+        suffix = _defs_match.group(3) or ""
+        current_user = _current_user(handler)
+        from api.workflow_trace import (
+            list_workflow_definitions as _list_workflow_defs,
+            get_workflow_definition as _get_workflow_def,
+            can_read_definition as _can_read_workflow_def,
+            list_definition_runs as _list_workflow_runs,
+            list_workflow_versions as _list_workflow_versions,
+        )
+
+        if not workflow_id:
+            project_id = parse_qs(parsed.query).get("project_id", [None])[0]
+            defs = _list_workflow_defs(
+                project_id=project_id,
+                user=current_user,
+                limit=100,
+                offset=0,
+            )
+            return j(handler, {"success": True, "data": defs})
+
+        if not _can_read_workflow_def(workflow_id, current_user):
+            return bad(handler, "Access denied", 403)
+        definition = _get_workflow_def(workflow_id)
+        if not definition:
+            return bad(handler, "Workflow definition not found", 404)
+
+        if suffix == "/runs":
+            runs = _list_workflow_runs(workflow_id, user=current_user, limit=100)
+            return j(handler, {"success": True, "data": runs})
+
+        if suffix == "/versions":
+            versions = _list_workflow_versions(workflow_id, limit=50)
+            return j(handler, {"success": True, "data": versions})
+
+        return j(handler, {"success": True, "data": definition})
+
+    # ── Workflow Trace API (GET) ──
+    # Pattern: /api/workflow/runs[/run_id[/suffix]]
+    _TRACE_RUNS_PATTERN = re.compile(r"^/api/workflow/runs(/([^/]+)(/.*)?)?$")
+    _m = _TRACE_RUNS_PATTERN.match(parsed.path or "")
+    if _m:
+        run_id = _m.group(2)
+        suffix = _m.group(3) or ""
+
+        # GET /api/workflow/runs — list runs filtered by user visibility
+        if not run_id:
+            from api.workflow_trace import list_runs as _trace_list_runs
+            project_id = parse_qs(parsed.query).get("project_id", [None])[0]
+            status = parse_qs(parsed.query).get("status", [None])[0]
+            current_user = _current_user(handler)
+            runs = _trace_list_runs(
+                project_id=project_id,
+                status=status or None,
+                limit=100,
+                offset=0,
+                user=current_user,
+            )
+            return j(handler, {"success": True, "data": runs})
+
+        # GET /api/workflow/runs/{run_id}
+        from api.workflow_trace import get_run as _trace_get_run, can_read_run as _can_read_trace
+        current_user = _current_user(handler)
+        if not _can_read_trace(run_id, current_user):
+            return bad(handler, "Access denied", 403)
+        run = _trace_get_run(run_id)
+        if not run:
+            return bad(handler, "Run not found", 404)
+
+        # GET /api/workflow/runs/{run_id}/events
+        if suffix == "/events":
+            from api.workflow_trace import list_run_events as _list_trace_events
+            return j(handler, {"success": True, "data": _list_trace_events(run_id)})
+
+        # GET /api/workflow/runs/{run_id}/nodes
+        if suffix == "/nodes":
+            from api.workflow_trace import list_run_nodes as _list_trace_nodes
+            return j(handler, {"success": True, "data": _list_trace_nodes(run_id)})
+
+        # GET /api/workflow/runs/{run_id}/artifacts
+        if suffix == "/artifacts":
+            from api.workflow_trace import list_run_artifacts as _list_trace_artifacts
+            return j(handler, {"success": True, "data": _list_trace_artifacts(run_id)})
+
+        # GET /api/workflow/runs/{run_id}/trace (full payload)
+        if suffix == "/trace":
+            from api.workflow_trace import get_trace_payload as _get_trace_payload
+            trace = _get_trace_payload(run_id)
+            if not trace:
+                return bad(handler, "Run not found", 404)
+            return j(handler, {"success": True, "data": trace})
+
+        return j(handler, {"success": True, "data": run})
+
+    # GET /api/workflow/trace-artifacts/{artifact_id}/content
+    _trace_artifact_content_match = re.match(
+        r"^/api/workflow/trace-artifacts/([^/]+)/content$", parsed.path or ""
+    )
+    if _trace_artifact_content_match:
+        artifact_id = _trace_artifact_content_match.group(1)
+        from api.workflow_trace import (
+            get_artifact_content as _get_trace_artifact_content,
+            get_artifact as _get_trace_artifact_meta,
+            can_read_run as _can_read_artifact_content,
+        )
+        meta = _get_trace_artifact_meta(artifact_id)
+        if not meta:
+            return bad(handler, "Artifact not found", 404)
+        current_user = _current_user(handler)
+        if not _can_read_artifact_content(meta["run_id"], current_user):
+            return bad(handler, "Access denied", 403)
+        content = _get_trace_artifact_content(artifact_id)
+        handler.send_response(200)
+        handler.send_header("Content-Type", "text/plain; charset=utf-8")
+        handler.end_headers()
+        if content:
+            handler.wfile.write(content.encode("utf-8"))
+        return True
+
+    # GET /api/workflow/trace-artifacts/{artifact_id}
+    _trace_artifact_match = re.match(
+        r"^/api/workflow/trace-artifacts/([^/]+)$", parsed.path or ""
+    )
+    if _trace_artifact_match:
+        artifact_id = _trace_artifact_match.group(1)
+        from api.workflow_trace import (
+            get_artifact as _get_trace_artifact,
+            can_read_run as _can_read_artifact,
+        )
+        artifact = _get_trace_artifact(artifact_id)
+        if not artifact:
+            return bad(handler, "Artifact not found", 404)
+        current_user = _current_user(handler)
+        if not _can_read_artifact(artifact["run_id"], current_user):
+            return bad(handler, "Access denied", 403)
+        return j(handler, {"success": True, "data": artifact})
+
+    # GET /api/workflow/canvas/{workflow_id} — load canvas definition
+    _canvas_get_pattern = re.compile(r"^/api/workflow/canvas/([^/]+)$")
+    _canvas_get_match = _canvas_get_pattern.match(parsed.path or "")
+    if _canvas_get_match and handler.command == "GET":
+        workflow_id = _canvas_get_match.group(1)
+        from api.workflow_trace import load_canvas_definition, can_read_definition
+        current_user = _current_user(handler)
+        if not can_read_definition(workflow_id, current_user):
+            return bad(handler, "Access denied", 403)
+        canvas = load_canvas_definition(workflow_id)
+        if not canvas:
+            return bad(handler, "Not found", 404)
+        return j(handler, {"success": True, "data": canvas})
+
+    # GET /api/workflow/canvas/live/{run_id} — SSE stream for live run status
+    _canvas_live_pattern = re.compile(r"^/api/workflow/canvas/live/([^/]+)$")
+    _canvas_live_match = _canvas_live_pattern.match(parsed.path or "")
+    if _canvas_live_match and handler.command == "GET":
+        run_id = _canvas_live_match.group(1)
+        from api.workflow_trace import can_read_run, get_run, list_run_nodes, list_run_events
+        current_user = _current_user(handler)
+        if not can_read_run(run_id, current_user):
+            return bad(handler, "Access denied", 403)
+        handler.send_response(200)
+        handler.send_header("Content-Type", "text/event-stream")
+        handler.send_header("Cache-Control", "no-cache")
+        handler.send_header("Connection", "keep-alive")
+        handler.end_headers()
+        import time
+        while True:
+            run = get_run(run_id)
+            nodes = list_run_nodes(run_id)
+            events = list_run_events(run_id)
+            data = json.dumps({"run": run, "nodes": nodes, "events": events[-10:]})
+            handler.wfile.write(("data: " + data + "\n\n").encode())
+            handler.wfile.flush()
+            if run and run.get("status") in ("completed", "failed", "cancelled"):
+                break
+            time.sleep(1.5)
+        return True
+
+    # GET /api/workflow/projects/{project_id}/members
+    _trace_proj_members_match = re.match(
+        r"^/api/workflow/projects/([^/]+)/members$", parsed.path or ""
+    )
+    if _trace_proj_members_match:
+        project_id = _trace_proj_members_match.group(1)
+        from api.workflow_trace import (
+            list_project_members as _list_proj_members,
+            can_read_run as _can_read_runs_via_project,
+        )
+        # Check if user can read any run in the project (implies membership or higher)
+        current_user = _current_user(handler)
+        # For listing members, require either membership or trace audit
+        if current_user:
+            from api.workflow_trace import user_can_trace_audit, get_user_role_in_project
+            username = current_user.get("username", "")
+            role = get_user_role_in_project(project_id, username)
+            is_admin = str(current_user.get("role", "")) == "admin"
+            is_auditor = user_can_trace_audit(current_user)
+            if not (role or is_admin or is_auditor):
+                return bad(handler, "Access denied", 403)
+        members = _list_proj_members(project_id)
+        return j(handler, {"success": True, "data": members})
+
     if parsed.path == "/api/wiki/status":
         return _handle_llm_wiki_status(handler, parsed)
     if parsed.path == "/api/logs":
@@ -3986,6 +4492,15 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path == "/api/memory":
         return _handle_memory_read(handler)
 
+    if parsed.path == "/api/profile/config":
+        return _handle_profile_config_read(handler)
+
+    if parsed.path == "/api/assistant/cockpit":
+        from api.profiles import cron_profile_context
+
+        with cron_profile_context():
+            return _handle_assistant_cockpit(handler, parsed)
+
     # ── Profile API (GET) ──
     if parsed.path == "/api/profiles":
         from api.profiles import list_profiles_api, get_active_profile_name
@@ -4227,6 +4742,233 @@ def handle_post(handler, parsed) -> bool:
             if not artifact:
                 return bad(handler, "Task not found", 404)
             return j(handler, {"success": True, "data": artifact})
+
+    # ── Workflow Definitions API POST handlers ──
+    if parsed.path == "/api/workflow/definitions":
+        from api.workflow_trace import create_workflow_definition as _create_workflow_def
+        current_user = _current_user(handler)
+        created_by = current_user.get("username", "unknown") if current_user else "unknown"
+        name = str(body.get("name", "")).strip() or "Untitled Workflow"
+        definition = _create_workflow_def(
+            name=name,
+            created_by=created_by,
+            project_id=body.get("project_id"),
+            description=str(body.get("description", "") or ""),
+            input_schema=body.get("input_schema") if isinstance(body.get("input_schema"), list) else [],
+            draft_steps=body.get("draft_steps") if isinstance(body.get("draft_steps"), list) else [],
+            default_profile=body.get("default_profile"),
+            metadata=body.get("metadata") if isinstance(body.get("metadata"), dict) else {},
+        )
+        return j(handler, {"success": True, "data": definition}, status=201)
+
+    _defs_publish_match = re.match(r"^/api/workflow/definitions/([^/]+)/publish$", parsed.path or "")
+    if _defs_publish_match:
+        workflow_id = _defs_publish_match.group(1)
+        current_user = _current_user(handler)
+        from api.workflow_trace import (
+            can_write_definition as _can_write_workflow_def,
+            publish_workflow_definition as _publish_workflow_def,
+        )
+        if not _can_write_workflow_def(workflow_id, current_user):
+            return bad(handler, "Access denied", 403)
+        actor = current_user.get("username", "unknown") if current_user else "unknown"
+        version = _publish_workflow_def(workflow_id, actor=actor)
+        if not version:
+            return bad(handler, "Workflow definition not found", 404)
+        return j(handler, {"success": True, "data": version}, status=201)
+
+    _defs_run_match = re.match(r"^/api/workflow/definitions/([^/]+)/(run|test-run)$", parsed.path or "")
+    if _defs_run_match:
+        workflow_id = _defs_run_match.group(1)
+        mode = _defs_run_match.group(2)
+        current_user = _current_user(handler)
+        from api.workflow_trace import (
+            can_read_definition as _can_read_workflow_def,
+            run_workflow_definition as _run_workflow_def,
+        )
+        if not _can_read_workflow_def(workflow_id, current_user):
+            return bad(handler, "Access denied", 403)
+        actor = current_user.get("username", "unknown") if current_user else "unknown"
+        inputs = body.get("inputs") if isinstance(body.get("inputs"), dict) else {}
+        try:
+            run = _run_workflow_def(
+                workflow_id=workflow_id,
+                actor=actor,
+                user=current_user,
+                inputs=inputs,
+                is_test_run=(mode == "test-run"),
+            )
+            return j(handler, {"success": True, "data": run}, status=201)
+        except PermissionError:
+            return bad(handler, "Access denied", 403)
+        except ValueError as e:
+            return bad(handler, str(e), 400)
+
+    _defs_lock_match = re.match(r"^/api/workflow/definitions/([^/]+)/(lock|unlock)$", parsed.path or "")
+    if _defs_lock_match:
+        workflow_id = _defs_lock_match.group(1)
+        lock_mode = _defs_lock_match.group(2)
+        current_user = _current_user(handler)
+        if not current_user:
+            return bad(handler, "Authentication required", 401)
+        from api.workflow_trace import (
+            can_write_definition as _can_write_workflow_def,
+            acquire_workflow_edit_lock as _acquire_workflow_edit_lock,
+            release_workflow_edit_lock as _release_workflow_edit_lock,
+        )
+        if not _can_write_workflow_def(workflow_id, current_user):
+            return bad(handler, "Access denied", 403)
+        username = current_user.get("username", "unknown")
+        if lock_mode == "unlock":
+            return j(handler, {"success": _release_workflow_edit_lock(workflow_id, username)})
+        ttl_seconds = int(body.get("ttl_seconds", 300) or 300)
+        return j(handler, {"success": True, "data": _acquire_workflow_edit_lock(workflow_id, username, ttl_seconds)})
+
+    # ── Workflow Trace API POST handlers ──
+    # POST /api/workflow/runs (create run)
+    if parsed.path == "/api/workflow/runs":
+        from api.workflow_trace import create_run as _trace_create_run
+        name = str(body.get("name", "Workflow Run"))
+        project_id = body.get("project_id")
+        current_user = _current_user(handler)
+        created_by = current_user.get("username", "unknown") if current_user else "unknown"
+        parent_run_id = body.get("parent_run_id")
+        metadata = body.get("metadata", {})
+        run = _trace_create_run(
+            project_id=project_id,
+            name=name,
+            created_by=created_by,
+            parent_run_id=parent_run_id,
+            metadata=metadata,
+        )
+        return j(handler, {"success": True, "data": run}, status=201)
+
+    # POST /api/workflow/runs/{run_id}/cancel
+    _trace_cancel_match = re.match(r"^/api/workflow/runs/([^/]+)/cancel$", parsed.path or "")
+    if _trace_cancel_match:
+        run_id = _trace_cancel_match.group(1)
+        from api.workflow_trace import cancel_run as _trace_cancel_run, can_write_run as _can_write_cancel
+        current_user = _current_user(handler)
+        if not _can_write_cancel(run_id, current_user):
+            return bad(handler, "Access denied", 403)
+        run = _trace_cancel_run(run_id)
+        if not run:
+            return bad(handler, "Run not found", 404)
+        return j(handler, {"success": True, "data": run})
+
+    # POST /api/workflow/runs/{run_id}/approval
+    _trace_approval_match = re.match(r"^/api/workflow/runs/([^/]+)/approval$", parsed.path or "")
+    if _trace_approval_match:
+        run_id = _trace_approval_match.group(1)
+        from api.workflow_trace import (
+            append_approval_event as _append_approval_event,
+            can_write_run as _can_write_approval,
+        )
+        current_user = _current_user(handler)
+        if not _can_write_approval(run_id, current_user):
+            return bad(handler, "Access denied", 403)
+        actor = current_user.get("username", "unknown") if current_user else "unknown"
+        node_id = body.get("node_id")
+        # pattern_keys is plural per RULE-9
+        pattern_keys = body.get("pattern_keys", [])
+        payload = body.get("payload", {})
+        event = _append_approval_event(run_id, node_id, actor, pattern_keys, payload)
+        if not event:
+            return bad(handler, "Run not found", 404)
+        return j(handler, {"success": True, "data": event}, status=201)
+
+    # POST /api/workflow/runs/{run_id}/events
+    _trace_events_match = re.match(r"^/api/workflow/runs/([^/]+)/events$", parsed.path or "")
+    if _trace_events_match:
+        run_id = _trace_events_match.group(1)
+        from api.workflow_trace import (
+            append_event as _trace_append_event,
+            can_write_run as _can_write_events,
+        )
+        current_user = _current_user(handler)
+        if not _can_write_events(run_id, current_user):
+            return bad(handler, "Access denied", 403)
+        event_type = str(body.get("event_type", ""))
+        if not event_type:
+            return bad(handler, "event_type is required", 400)
+        actor = body.get("actor")
+        node_id = body.get("node_id")
+        payload = body.get("payload", {})
+        event = _trace_append_event(run_id, event_type, actor=actor, node_id=node_id, payload=payload)
+        return j(handler, {"success": True, "data": event}, status=201)
+
+    # POST /api/workflow/projects/{project_id}/members (add/update member — owner only)
+    _trace_add_member_match = re.match(
+        r"^/api/workflow/projects/([^/]+)/members$", parsed.path or ""
+    )
+    if _trace_add_member_match:
+        project_id = _trace_add_member_match.group(1)
+        from api.workflow_trace import (
+            upsert_project_membership as _upsert_member,
+            get_user_role_in_project as _get_role,
+            user_can_trace_audit,
+        )
+        current_user = _current_user(handler)
+        if not current_user:
+            return bad(handler, "Authentication required", 401)
+        username = str(body.get("username", "")).strip()
+        if not username:
+            return bad(handler, "username is required", 400)
+        role = str(body.get("role", "member")).strip()
+        if role not in ("owner", "writer", "member", "reader"):
+            return bad(handler, f"Invalid role: {role}", 400)
+        # Only owner can manage members
+        caller_role = _get_role(project_id, current_user.get("username", ""))
+        is_admin = str(current_user.get("role", "")) == "admin"
+        is_auditor = user_can_trace_audit(current_user)
+        if not (is_admin or is_auditor or caller_role == "owner"):
+            return bad(handler, "Only project owner can manage members", 403)
+        _upsert_member(
+            project_id, username, role=role,
+            can_read=body.get("can_read", role != "reader"),
+            can_write=body.get("can_write", role in ("owner", "writer")),
+        )
+        return j(handler, {"success": True}, status=201)
+
+    # POST /api/workflow/canvas — save canvas definition
+    # POST /api/workflow/canvas/run — run canvas workflow (inline nodes/edges)
+    _canvas_pattern = re.compile(r"^/api/workflow/canvas(/run)?$")
+    _canvas_match = _canvas_pattern.match(parsed.path or "")
+    if _canvas_match and handler.command == "POST":
+        is_run = bool(_canvas_match.group(1))
+        body = read_body(handler)
+        try:
+            data = json.loads(body) if body else {}
+        except json.JSONDecodeError:
+            return bad(handler, "Invalid JSON", 400)
+        current_user = _current_user(handler)
+        username = current_user.get("username", "unknown") if current_user else "unknown"
+
+        if is_run:
+            from api.workflow_trace import run_canvas_workflow
+            try:
+                run = run_canvas_workflow(
+                    workflow_id=None,
+                    actor=username,
+                    inputs=data.get("inputs", {}),
+                    inline_nodes=data.get("nodes", []),
+                    inline_edges=data.get("edges", []),
+                )
+                return j(handler, {"success": True, "data": run})
+            except Exception as exc:
+                return bad(handler, str(exc), 400)
+
+        from api.workflow_trace import save_canvas_definition
+        try:
+            wf = save_canvas_definition(
+                name=data.get("name", "Untitled"),
+                nodes=data.get("nodes", []),
+                edges=data.get("edges", []),
+                created_by=username,
+            )
+            return j(handler, {"success": True, "data": wf})
+        except Exception as exc:
+            return bad(handler, str(exc), 500)
 
     if parsed.path == "/api/setup/admin":
         from api.auth import get_password_hash
@@ -5193,6 +5935,12 @@ def handle_post(handler, parsed) -> bool:
     if parsed.path == "/api/memory/write":
         return _handle_memory_write(handler, body)
 
+    if parsed.path == "/api/profile/config":
+        return _handle_profile_config_write(handler, body)
+
+    if parsed.path == "/api/assistant/send":
+        return _handle_assistant_send(handler, body)
+
     # ── Profile API (POST) ──
     if parsed.path == "/api/profile/switch":
         if is_multi_user_mode():
@@ -5814,6 +6562,40 @@ def handle_patch(handler, parsed) -> bool:
             return j(handler, {"ok": True, "user": user})
         except ValueError as e:
             return bad(handler, str(e), 400)
+
+    # ── Workflow Definitions PATCH ──
+    _trace_def_patch = re.match(r"^/api/workflow/definitions/([^/]+)$", parsed.path or "")
+    if _trace_def_patch:
+        workflow_id = _trace_def_patch.group(1)
+        from api.workflow_trace import (
+            can_write_definition as _can_write_workflow_def,
+            update_workflow_definition as _update_workflow_def,
+        )
+        current_user = _current_user(handler)
+        if not _can_write_workflow_def(workflow_id, current_user):
+            return bad(handler, "Access denied", 403)
+        patch = {}
+        for key in ("name", "description", "default_profile", "input_schema", "draft_steps", "metadata", "status"):
+            if key in body:
+                patch[key] = body.get(key)
+        updated = _update_workflow_def(workflow_id, **patch)
+        if not updated:
+            return bad(handler, "Workflow definition not found", 404)
+        return j(handler, {"success": True, "data": updated})
+
+    # ── Workflow Trace PATCH ──
+    # PATCH /api/workflow/runs/{run_id}
+    _trace_run_patch = re.match(r"^/api/workflow/runs/([^/]+)$", parsed.path or "")
+    if _trace_run_patch:
+        run_id = _trace_run_patch.group(1)
+        from api.workflow_trace import update_run as _trace_update_run, can_write_run as _can_write_patch
+        current_user = _current_user(handler)
+        if not _can_write_patch(run_id, current_user):
+            return bad(handler, "Access denied", 403)
+        run = _trace_update_run(run_id, **body)
+        if not run:
+            return bad(handler, "Run not found", 404)
+        return j(handler, {"success": True, "data": run})
     return False
 
 
@@ -5838,6 +6620,31 @@ def handle_delete(handler, parsed) -> bool:
         if delete_task(task_id):
             return j(handler, {"success": True})
         return bad(handler, "Task not found", 404)
+
+    # DELETE /api/workflow/projects/{project_id}/members/{username}
+    _trace_del_member_match = re.match(
+        r"^/api/workflow/projects/([^/]+)/members/([^/]+)$", parsed.path or ""
+    )
+    if _trace_del_member_match:
+        project_id = _trace_del_member_match.group(1)
+        target_username = _trace_del_member_match.group(2)
+        from api.workflow_trace import (
+            remove_project_membership as _remove_member,
+            get_user_role_in_project as _get_role,
+            user_can_trace_audit,
+        )
+        current_user = _current_user(handler)
+        if not current_user:
+            return bad(handler, "Authentication required", 401)
+        caller_role = _get_role(project_id, current_user.get("username", ""))
+        is_admin = str(current_user.get("role", "")) == "admin"
+        is_auditor = user_can_trace_audit(current_user)
+        if not (is_admin or is_auditor or caller_role == "owner"):
+            return bad(handler, "Only project owner can manage members", 403)
+        removed = _remove_member(project_id, target_username)
+        if not removed:
+            return bad(handler, "Member not found", 404)
+        return j(handler, {"success": True})
 
     _m = re.match(r"^/api/tokens/(\d+)$", parsed.path or "")
     if _m:
@@ -7159,6 +7966,71 @@ def _handle_memory_read(handler):
     )
 
 
+def _handle_profile_config_read(handler):
+    profile_home = None
+    try:
+        from api.profiles import read_profile_config, get_active_hermes_home
+
+        profile_home = get_active_hermes_home()
+        cfg = read_profile_config(profile_home)
+    except Exception as e:
+        return bad(handler, f"Failed to load profile config: {e}", 500)
+    assistant_cfg = cfg.get("assistant", {})
+    if not isinstance(assistant_cfg, dict):
+        assistant_cfg = {}
+    return j(
+        handler,
+        {
+            "profile_home": str(profile_home),
+            "assistant": assistant_cfg,
+        },
+    )
+
+
+def _handle_profile_config_write(handler, body):
+    profile_home = None
+    try:
+        from api.profiles import write_profile_config, get_active_hermes_home
+
+        profile_home = get_active_hermes_home()
+        assistant_cfg = body.get("assistant", body)
+        if not isinstance(assistant_cfg, dict):
+            return bad(handler, "assistant config must be an object")
+        saved = write_profile_config(profile_home, {"assistant": assistant_cfg})
+    except Exception as e:
+        return bad(handler, f"Failed to save profile config: {e}", 500)
+    assistant_cfg = saved.get("assistant", {})
+    if not isinstance(assistant_cfg, dict):
+        assistant_cfg = {}
+    return j(
+        handler,
+        {
+            "ok": True,
+            "profile_home": str(profile_home),
+            "assistant": assistant_cfg,
+        },
+    )
+
+
+def _handle_assistant_send(handler, body):
+    message = str(body.get("message") or "").strip()
+    if not message:
+        return bad(handler, "message is required")
+    try:
+        from tools.send_message_tool import send_message_tool
+
+        result = send_message_tool({"action": "send", "target": "teams", "message": message})
+    except Exception as e:
+        return bad(handler, f"Failed to send Teams message: {e}", 500)
+    try:
+        parsed = json.loads(result)
+    except Exception:
+        parsed = {"result": result}
+    if isinstance(parsed, dict) and parsed.get("error"):
+        return j(handler, {"ok": False, **parsed}, status=400)
+    return j(handler, {"ok": True, "result": parsed})
+
+
 # ── POST route helpers ────────────────────────────────────────────────────────
 
 
@@ -7890,6 +8762,8 @@ def _handle_cron_create(handler, body):
             deliver=body.get("deliver") or "local",
             skills=body.get("skills") or [],
             model=body.get("model") or None,
+            assistant_managed=_coerce_bool(body.get("assistant_managed"), False),
+            assistant_memory_injection=_coerce_bool(body.get("assistant_memory_injection"), True),
         )
         if profile is not None:
             job = update_job(job["id"], {"profile": profile}) or job
@@ -7914,6 +8788,10 @@ def _handle_cron_update(handler, body):
                 continue
             if k == "profile":
                 updates[k] = _normalize_cron_profile_for_request(handler, v)
+            elif k == "assistant_managed":
+                updates[k] = _coerce_bool(v, False)
+            elif k == "assistant_memory_injection":
+                updates[k] = _coerce_bool(v, True)
             elif v is not None:
                 updates[k] = v
     except PermissionError as e:
