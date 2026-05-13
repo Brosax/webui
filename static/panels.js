@@ -4749,16 +4749,16 @@ let _settingsPreferencesAutosaveTimer = null;
 let _settingsPreferencesAutosaveRetryPayload = null;
 
 function switchSettingsSection(name){
-  const section=(name==='appearance'||name==='preferences'||name==='providers'||name==='plugins'||name==='users'||name==='system')?name:'conversation';
+  const section=(name==='appearance'||name==='preferences'||name==='providers'||name==='plugins'||name==='users'||name==='spaces'||name==='system')?name:'conversation';
   _settingsSection=section;
   _currentSettingsSection=section;
-  const map={conversation:'Conversation',appearance:'Appearance',preferences:'Preferences',providers:'Providers',plugins:'Plugins',users:'Users',system:'System'};
+  const map={conversation:'Conversation',appearance:'Appearance',preferences:'Preferences',providers:'Providers',plugins:'Plugins',users:'Users',spaces:'Spaces',system:'System'};
   // Sidebar menu items
   document.querySelectorAll('#settingsMenu .side-menu-item').forEach(it=>{
     it.classList.toggle('active', it.dataset.settingsSection===section);
   });
   // Panes in main
-  ['conversation','appearance','preferences','providers','plugins','users','system'].forEach(key=>{
+  ['conversation','appearance','preferences','providers','plugins','users','spaces','system'].forEach(key=>{
     const pane=$('settingsPane'+map[key]);
     if(pane) pane.classList.toggle('active', key===section);
   });
@@ -4769,6 +4769,7 @@ function switchSettingsSection(name){
   if(section==='providers') loadProvidersPanel();
   if(section==='plugins') loadPluginsPanel();
   if(section==='users') loadUsersPanel();
+  if(section==='spaces') loadSpacesPanel();
 }
 
 function _syncHermesPanelSessionActions(){
@@ -6346,14 +6347,12 @@ async function loadUsersPanel(){
     const adminView=$('usersAdminView');
     const selfView=$('usersSelfView');
     const legacyView=$('usersLegacyView');
-    const tokensSection=$('usersTokensSection');
     if(!adminView||!selfView||!legacyView) return;
     if(!isMulti){
       _authMode='legacy';
       adminView.style.display='none';
       selfView.style.display='none';
       legacyView.style.display='block';
-      if(tokensSection) tokensSection.style.display='none';
       const sharedWsSection=$('sharedWorkspacesSection');
       if(sharedWsSection) sharedWsSection.style.display='none';
       return;
@@ -6364,7 +6363,6 @@ async function loadUsersPanel(){
     if(isAdmin){
       adminView.style.display='block';
       selfView.style.display='none';
-      if(tokensSection) tokensSection.style.display='block';
       if(sharedWsSection) sharedWsSection.style.display='block';
       await _loadUsersDirectory();
       await _loadSharedWorkspaces();
@@ -6372,10 +6370,8 @@ async function loadUsersPanel(){
       if(sharedWsSection) sharedWsSection.style.display='none';
       adminView.style.display='none';
       selfView.style.display='block';
-      if(tokensSection) tokensSection.style.display='block';
       _renderSelfSummary(_currentUserCache);
     }
-    await _loadTokens();
   }catch(e){
     showToast('Failed to load users panel: '+e.message,'error');
   }
@@ -6602,119 +6598,6 @@ function _renderSelfSummary(user){
     </div>`;
 }
 
-// ── API Tokens ──────────────────────────────────────────────────────────────
-
-async function _loadTokens(){
-  try{
-    const data=await api('/api/tokens');
-    const tokens=Array.isArray(data.tokens)?data.tokens:[];
-    _renderTokensList(tokens);
-  }catch(e){
-    // Non-logged-in or legacy mode: hide tokens section gracefully
-    const sec=$('usersTokensSection');
-    if(sec) sec.style.display='none';
-  }
-}
-
-function _renderTokensList(tokens){
-  const list=$('tokensList');
-  const empty=$('tokensEmpty');
-  if(!list) return;
-  if(!tokens.length){
-    list.innerHTML='';
-    if(empty) empty.style.display='block';
-    return;
-  }
-  if(empty) empty.style.display='none';
-  let html='';
-  for(const t of tokens){
-    const scopes=(t.scopes||[]).map(s=>`<span class="users-badge">${esc(s)}</span>`).join('');
-    const created=t.created_at?new Date(t.created_at*1000).toLocaleDateString():'—';
-    const lastUsed=t.last_used_at?new Date(t.last_used_at*1000).toLocaleString():'Never';
-    const expires=t.expires_at?new Date(t.expires_at*1000).toLocaleDateString():'Never';
-    const revoked=t.revoked_at?new Date(t.revoked_at*1000).toLocaleDateString():null;
-    const statusHtml=revoked
-      ?`<span class="users-badge users-badge-disabled">revoked ${esc(revoked)}</span>`
-      :'<span class="users-badge users-badge-active">active</span>';
-    html+=`<div class="users-token-row">
-      <div class="users-token-info">
-        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
-          <span style="font-size:13px;font-weight:500;color:var(--text)">${esc(t.name)}</span>
-          <code style="font-size:11px;color:var(--muted)">${esc(t.prefix)}…</code>
-          ${statusHtml}
-          ${scopes}
-        </div>
-        <div style="font-size:11px;color:var(--muted);margin-top:4px">
-          Created ${esc(created)} · Last used ${esc(lastUsed)} · Expires ${esc(expires)}
-        </div>
-      </div>
-      <div style="flex-shrink:0">
-        ${!revoked?`<button class="users-action-btn users-action-danger" title="Revoke" onclick="revokeToken(${t.id},'${esc(t.name)}')"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 1 2 2 2v2"/></svg></button>`:''}
-      </div>
-    </div>`;
-  }
-  list.innerHTML=html;
-}
-
-function showCreateTokenForm(){
-  const form=$('tokenCreateForm');
-  if(form) form.style.display='block';
-  const banner=$('tokenCreatedBanner');
-  if(banner) banner.style.display='none';
-  const nm=$('newTokenName');if(nm) nm.focus();
-}
-function hideCreateTokenForm(){
-  const form=$('tokenCreateForm');
-  if(form) form.style.display='none';
-  const nm=$('newTokenName');if(nm) nm.value='';
-  const sc=$('newTokenScopeChat');if(sc) sc.checked=true;
-  const sf=$('newTokenScopeFiles');if(sf) sf.checked=true;
-  const sa=$('newTokenScopeAdmin');if(sa) sa.checked=false;
-}
-
-async function submitCreateToken(){
-  const name=($('newTokenName')||{}).value||'token';
-  const scopes=[];
-  if(($('newTokenScopeChat')||{}).checked) scopes.push('chat');
-  if(($('newTokenScopeFiles')||{}).checked) scopes.push('files');
-  if(($('newTokenScopeAdmin')||{}).checked) scopes.push('admin');
-  if(!scopes.length){showToast('Select at least one scope','error');return;}
-  try{
-    const data=await api('/api/tokens',{method:'POST',body:JSON.stringify({name:name.trim(),scopes})});
-    if(data&&data.token&&data.token.token){
-      const banner=$('tokenCreatedBanner');
-      const val=$('tokenCreatedValue');
-      if(banner) banner.style.display='flex';
-      if(val) val.textContent=data.token.token;
-    }
-    showToast('Token created');
-    hideCreateTokenForm();
-    await _loadTokens();
-  }catch(e){
-    showToast('Create token failed: '+e.message,'error');
-  }
-}
-
-let _lastCreatedToken='';
-function copyCreatedToken(){
-  const val=$('tokenCreatedValue');
-  if(!val) return;
-  navigator.clipboard.writeText(val.textContent).then(()=>showToast('Copied')).catch(()=>showToast('Copy failed','error'));
-}
-
-async function revokeToken(tid,name){
-  const ok=await showConfirmDialog({title:'Revoke Token',message:`Revoke token "${name}"? It will stop working immediately.`,confirmLabel:'Revoke',danger:true,focusCancel:true});
-  if(!ok) return;
-  try{
-    await api('/api/tokens/'+tid,{method:'DELETE'});
-    showToast('Token revoked');
-    await _loadTokens();
-  }catch(e){
-    showToast('Revoke failed: '+e.message,'error');
-  }
-}
-
-// ── Shared Workspaces (admin-only, multi-user mode) ─────────────────────────
 
 let _sharedWorkspacesCache=[];
 let _editingSharedWsPath=null;

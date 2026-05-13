@@ -295,6 +295,10 @@
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
           <span>Users</span>
         </button>
+        <button type="button" class="side-menu-item" data-settings-section="spaces" onclick="switchSettingsSection('spaces')">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+          <span>Spaces</span>
+        </button>
         <button type="button" class="side-menu-item" data-settings-section="system" onclick="switchSettingsSection('system')">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="3" width="20" height="8" rx="2"/><rect x="2" y="13" width="20" height="8" rx="2"/><line x1="6" y1="7" x2="6.01" y2="7"/><line x1="6" y1="17" x2="6.01" y2="17"/></svg>
           <span>System</span>
@@ -1210,43 +1214,50 @@
                 Use the <strong>System</strong> panel to manage the Access Password.
               </div>
             </div>
-            <!-- API Tokens (shared by admin and non-admin) -->
-            <div id="usersTokensSection" style="margin-top:24px;padding-top:20px;border-top:1px solid var(--border)">
+          </div>
+          <div class="settings-pane" id="settingsPaneSpaces">
+            <div class="settings-section-head">
+              <div>
+                <div class="settings-section-title">Spaces</div>
+                <div class="settings-section-meta">Manage shared workspaces visible to all users.</div>
+              </div>
+            </div>
+            <div id="settingsSharedWorkspacesSection">
               <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
                 <div>
-                  <div style="font-size:15px;font-weight:600;color:var(--text)">API Tokens</div>
-                  <div style="font-size:12px;color:var(--muted)">Manage API tokens for programmatic access.</div>
+                  <div style="font-size:13px;font-weight:500;color:var(--text)">Shared Workspaces</div>
                 </div>
-                <button class="sm-btn" onclick="showCreateTokenForm()">+ New Token</button>
+                <button class="sm-btn" id="btnAddSharedWorkspace" onclick="showAddSharedWorkspaceForm()">+ Add Workspace</button>
               </div>
-              <div id="tokenCreateForm" class="users-create-form" style="display:none">
+              <div id="sharedWorkspaceForm" class="users-create-form" style="display:none">
                 <div class="users-form-row">
-                  <div class="users-form-field">
-                    <label>Token Name</label>
-                    <input type="text" id="newTokenName" placeholder="e.g. ci-bot" autocomplete="off">
+                  <div class="users-form-field" style="flex:2">
+                    <label>Path</label>
+                    <input type="text" id="sharedWsPath" placeholder="/path/to/workspace" autocomplete="off">
                   </div>
                   <div class="users-form-field">
-                    <label>Scopes</label>
-                    <div class="users-scope-checks">
-                      <label><input type="checkbox" id="newTokenScopeChat" checked> chat</label>
-                      <label><input type="checkbox" id="newTokenScopeFiles" checked> files</label>
-                      <label><input type="checkbox" id="newTokenScopeAdmin"> admin</label>
-                    </div>
+                    <label>Name (optional)</label>
+                    <input type="text" id="sharedWsName" placeholder="Display name" autocomplete="off">
+                  </div>
+                </div>
+                <div class="users-form-row">
+                  <div class="users-form-field">
+                    <label>Mode</label>
+                    <select id="sharedWsMode">
+                      <option value="read_write">Read &amp; Write</option>
+                      <option value="read_only">Read Only</option>
+                    </select>
                   </div>
                 </div>
                 <div class="users-form-actions">
-                  <button class="sm-btn" onclick="submitCreateToken()">Create Token</button>
-                  <button class="sm-btn users-cancel-btn" onclick="hideCreateTokenForm()">Cancel</button>
+                  <button class="sm-btn" id="btnSubmitSharedWorkspace" onclick="submitSharedWorkspace()">Add Workspace</button>
+                  <button class="sm-btn users-cancel-btn" onclick="hideSharedWorkspaceForm()">Cancel</button>
                 </div>
+                <div id="sharedWsFormError" class="detail-form-error" style="display:none"></div>
               </div>
-              <div id="tokenCreatedBanner" class="users-token-banner" style="display:none">
-                <div style="font-size:12px;font-weight:600;color:var(--success);margin-bottom:4px">Token created — copy it now, it won't be shown again:</div>
-                <code id="tokenCreatedValue" class="users-token-value"></code>
-                <button class="sm-btn" style="margin-left:8px;padding:4px 10px;font-size:11px" onclick="copyCreatedToken()">Copy</button>
-              </div>
-              <div id="tokensList"></div>
-              <div id="tokensEmpty" style="display:none;text-align:center;padding:24px 0;color:var(--muted);font-size:13px">
-                No API tokens yet.
+              <div id="sharedWorkspacesList"></div>
+              <div id="sharedWorkspacesEmpty" style="display:none;text-align:center;padding:24px 0;color:var(--muted);font-size:13px">
+                No shared workspaces configured.
               </div>
             </div>
           </div>
