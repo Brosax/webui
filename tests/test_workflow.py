@@ -471,3 +471,55 @@ class TestWorkflowAPI:
         """GET /api/workflow/artifacts/{invalid_id}/content returns 404."""
         content, status = _get_content("/api/workflow/artifacts/nonexistent/content")
         assert status == 404
+
+
+def test_workflow_e2e():
+    """Full workflow: create task → add call → add artifact → verify"""
+    # Create task
+    resp = _post_json("/api/workflow/tasks", {
+        "name": "E2E Test Task",
+        "input": {"tool": "test"}
+    })
+    assert resp.get("success") is True
+    task = resp["data"]
+    task_id = task["id"]
+
+    # Add call
+    call_resp = _post_json(f"/api/workflow/tasks/{task_id}/calls", {
+        "agent_name": "test_agent",
+        "input": {"query": "test"}
+    })
+    call = call_resp["data"]
+    call_id = call["id"]
+
+    # Update call
+    patch_resp, _ = _patch_json(
+        f"/api/workflow/tasks/{task_id}/calls/{call_id}",
+        {"status": "completed", "output": {"result": "success"}}
+    )
+    assert patch_resp.get("success") is True
+
+    # Add artifact
+    art_resp = _post_json(f"/api/workflow/tasks/{task_id}/artifacts", {
+        "call_id": call_id,
+        "name": "result.md",
+        "content": "# Test Result",
+        "type": "document"
+    })
+    assert art_resp.get("success") is True
+    artifact_id = art_resp["data"]["id"]
+
+    # Verify task has call and artifact
+    resp, _ = _get_json(f"/api/workflow/tasks/{task_id}")
+    task = resp["data"]
+    assert call_id in task["calls"]
+    assert artifact_id in task["artifacts"]
+
+    # Get artifact content
+    content, status = _get_content(f"/api/workflow/artifacts/{artifact_id}/content")
+    assert status == 200
+    assert "# Test Result" in content
+
+    # Cleanup
+    del_resp, _ = _delete_json(f"/api/workflow/tasks/{task_id}")
+    assert del_resp.get("success") is True
