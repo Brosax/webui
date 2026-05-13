@@ -32,6 +32,7 @@ _load_repo_dotenv_preserving_env() {
 
   local -a preserved=()
   local line key value
+  local readonly_env_names='^(UID|GID|EUID|EGID|PPID)$'
   while IFS= read -r line || [[ -n "${line}" ]]; do
     line="${line#${line%%[![:space:]]*}}"
     [[ -z "${line}" || "${line}" == \#* || "${line}" != *=* ]] && continue
@@ -39,6 +40,7 @@ _load_repo_dotenv_preserving_env() {
     key="${key#export }"
     key="${key//[[:space:]]/}"
     [[ "${key}" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+    [[ "${key}" =~ ${readonly_env_names} ]] && continue
     if [[ -n "${!key+x}" ]]; then
       value="${!key}"
       preserved+=("${key}=${value}")
@@ -47,7 +49,7 @@ _load_repo_dotenv_preserving_env() {
 
   set -a
   # shellcheck source=/dev/null
-  source "${env_file}"
+  source <(grep -vE '^[[:space:]]*(export[[:space:]]+)?(UID|GID|EUID|EGID|PPID)[[:space:]]*=' "${env_file}")
   set +a
 
   local assignment

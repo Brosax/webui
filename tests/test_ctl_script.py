@@ -163,6 +163,75 @@ def test_start_loads_dotenv_but_inline_overrides_win(tmp_path):
         assert_process_exits(pid)
 
 
+def test_start_accepts_host_flag_without_forwarding_host_value_as_extra_arg(tmp_path):
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    shutil.copy2(CTL, repo_root / "ctl.sh")
+    (repo_root / "bootstrap.py").write_text("# fake bootstrap target\n", encoding="utf-8")
+
+    fake_python = tmp_path / "fake-python"
+    fake_log = tmp_path / "fake-python.log"
+    write_fake_python(fake_python)
+
+    result = run_ctl(
+        tmp_path,
+        "start",
+        "--host",
+        "0.0.0.0",
+        env={
+            "HERMES_WEBUI_PYTHON": str(fake_python),
+            "FAKE_PYTHON_LOG": str(fake_log),
+        },
+        repo_root=repo_root,
+    )
+    assert result.returncode == 0, result.stderr + result.stdout
+    pid = wait_for_pid_file(tmp_path / ".hermes" / "webui.pid")
+    try:
+        fake_output = fake_log.read_text(encoding="utf-8")
+        assert "--host 0.0.0.0 8787" in fake_output
+        assert "0.0.0.0 8787 0.0.0.0" not in fake_output
+        assert "host=0.0.0.0 port=8787" in fake_output
+    finally:
+        stop = run_ctl(tmp_path, "stop", repo_root=repo_root)
+        assert stop.returncode == 0, stop.stderr + stop.stdout
+        assert_process_exits(pid)
+
+
+def test_start_ignores_docker_dotenv_readonly_uid_gid(tmp_path):
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    shutil.copy2(CTL, repo_root / "ctl.sh")
+    (repo_root / "bootstrap.py").write_text("# fake bootstrap target\n", encoding="utf-8")
+
+    fake_python = tmp_path / "fake-python"
+    fake_log = tmp_path / "fake-python.log"
+    write_fake_python(fake_python)
+    (repo_root / ".env").write_text(
+        "UID=1000\nGID=1000\nHERMES_WEBUI_PORT=18889\n",
+        encoding="utf-8",
+    )
+
+    result = run_ctl(
+        tmp_path,
+        "start",
+        env={
+            "HERMES_WEBUI_PYTHON": str(fake_python),
+            "FAKE_PYTHON_LOG": str(fake_log),
+        },
+        repo_root=repo_root,
+    )
+    assert result.returncode == 0, result.stderr + result.stdout
+    pid = wait_for_pid_file(tmp_path / ".hermes" / "webui.pid")
+    try:
+        fake_output = fake_log.read_text(encoding="utf-8")
+        assert "host=127.0.0.1 port=18889" in fake_output
+        assert "readonly variable" not in result.stderr
+    finally:
+        stop = run_ctl(tmp_path, "stop", repo_root=repo_root)
+        assert stop.returncode == 0, stop.stderr + stop.stdout
+        assert_process_exits(pid)
+
+
 def test_stale_pid_file_is_removed_without_killing_unrelated_process(tmp_path):
     hermes_home = tmp_path / ".hermes"
     hermes_home.mkdir()
