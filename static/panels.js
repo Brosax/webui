@@ -6353,21 +6353,15 @@ async function loadUsersPanel(){
       adminView.style.display='none';
       selfView.style.display='none';
       legacyView.style.display='block';
-      const sharedWsSection=$('sharedWorkspacesSection');
-      if(sharedWsSection) sharedWsSection.style.display='none';
       return;
     }
     _authMode='multi';
     legacyView.style.display='none';
-    const sharedWsSection=$('sharedWorkspacesSection');
     if(isAdmin){
       adminView.style.display='block';
       selfView.style.display='none';
-      if(sharedWsSection) sharedWsSection.style.display='block';
       await _loadUsersDirectory();
-      await _loadSharedWorkspaces();
     }else{
-      if(sharedWsSection) sharedWsSection.style.display='none';
       adminView.style.display='none';
       selfView.style.display='block';
       _renderSelfSummary(_currentUserCache);
@@ -6375,6 +6369,67 @@ async function loadUsersPanel(){
   }catch(e){
     showToast('Failed to load users panel: '+e.message,'error');
   }
+}
+
+async function loadSpacesPanel(){
+  const status=await api('/api/auth/status').catch(()=>({}));
+  const isAdmin=!!(status&&status.user&&status.user.role==='admin');
+  // Load workspaces (personal list) always
+  await _loadWorkspacesForSettings();
+  // Shared workspaces only for admin
+  if(isAdmin){
+    await _loadSharedWorkspaces();
+  }else{
+    const section=$('settingsSharedWorkspacesSection');
+    if(section) section.innerHTML='';
+  }
+}
+
+async function _loadWorkspacesForSettings(){
+  try{
+    const data=await api('/api/workspaces');
+    _workspaceList=Array.isArray(data.workspaces)?data.workspaces:[];
+    _renderWorkspacesListForSettings(_workspaceList);
+  }catch(e){
+    showToast('Failed to load workspaces: '+e.message,'error');
+  }
+}
+
+function _renderWorkspacesListForSettings(workspaces){
+  const list=$('settingsWorkspacesList');
+  const empty=$('settingsWorkspacesEmpty');
+  if(!list) return;
+  if(!workspaces.length){
+    list.innerHTML='';
+    if(empty) empty.style.display='block';
+    return;
+  }
+  if(empty) empty.style.display='none';
+  const activePath=S.session?S.session.workspace:'';
+  let html='';
+  for(const w of workspaces){
+    const isActive=w.path===activePath;
+    html+=`<div class="ws-row" data-path="${esc(w.path)}" style="display:flex;align-items:center;gap:10px;padding:8px 10px;border:1px solid var(--border);border-radius:6px;margin-bottom:4px;cursor:pointer">
+      <span style="color:var(--muted);flex-shrink:0">${li('folder',14)}</span>
+      <div style="flex:1;min-width:0">
+        <div style="font-size:13px;font-weight:500;color:var(--text)">${esc(w.name||w.path)}</div>
+        <div style="font-size:11px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(w.path)}</div>
+      </div>
+      ${isActive?'<span style="font-size:10px;padding:1px 6px;border-radius:8px;background:rgba(61,139,64,.15);color:var(--success);border:1px solid rgba(61,139,64,.3);flex-shrink:0">active</span>':''}
+    </div>`;
+  }
+  list.innerHTML=html;
+  list.querySelectorAll('.ws-row').forEach(row=>{
+    row.onclick=()=>{
+      if(typeof switchPanel==='function') switchPanel('workspaces');
+      setTimeout(()=>openWorkspaceDetail(row.dataset.path),50);
+    };
+  });
+}
+
+function showWorkspaceFormForSettings(){
+  if(typeof switchPanel==='function') switchPanel('workspaces');
+  setTimeout(()=>openWorkspaceCreate(),50);
 }
 
 async function _loadUsersDirectory(){

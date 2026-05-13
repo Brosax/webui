@@ -1163,46 +1163,6 @@
                 No users found.
               </div>
             </div>
-            <!-- Admin: Shared Workspaces management -->
-            <div id="sharedWorkspacesSection" style="display:none;margin-top:24px;padding-top:20px;border-top:1px solid var(--border)">
-              <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
-                <div>
-                  <div style="font-size:15px;font-weight:600;color:var(--text)">Shared Workspaces</div>
-                  <div style="font-size:12px;color:var(--muted)">Manage shared workspaces visible to all users.</div>
-                </div>
-                <button class="sm-btn" id="btnAddSharedWorkspace" onclick="showAddSharedWorkspaceForm()">+ Add Workspace</button>
-              </div>
-              <div id="sharedWorkspaceForm" class="users-create-form" style="display:none">
-                <div class="users-form-row">
-                  <div class="users-form-field" style="flex:2">
-                    <label>Path</label>
-                    <input type="text" id="sharedWsPath" placeholder="/path/to/workspace" autocomplete="off">
-                  </div>
-                  <div class="users-form-field">
-                    <label>Name (optional)</label>
-                    <input type="text" id="sharedWsName" placeholder="Display name" autocomplete="off">
-                  </div>
-                </div>
-                <div class="users-form-row">
-                  <div class="users-form-field">
-                    <label>Mode</label>
-                    <select id="sharedWsMode">
-                      <option value="read_write">Read &amp; Write</option>
-                      <option value="read_only">Read Only</option>
-                    </select>
-                  </div>
-                </div>
-                <div class="users-form-actions">
-                  <button class="sm-btn" id="btnSubmitSharedWorkspace" onclick="submitSharedWorkspace()">Add Workspace</button>
-                  <button class="sm-btn users-cancel-btn" onclick="hideSharedWorkspaceForm()">Cancel</button>
-                </div>
-                <div id="sharedWsFormError" class="detail-form-error" style="display:none"></div>
-              </div>
-              <div id="sharedWorkspacesList"></div>
-              <div id="sharedWorkspacesEmpty" style="display:none;text-align:center;padding:24px 0;color:var(--muted);font-size:13px">
-                No shared workspaces configured.
-              </div>
-            </div>
             <!-- Non-admin: own account summary + tokens -->
             <div id="usersSelfView" style="display:none">
               <div id="usersSelfSummary" class="users-self-summary"></div>
@@ -1219,10 +1179,18 @@
             <div class="settings-section-head">
               <div>
                 <div class="settings-section-title">Spaces</div>
-                <div class="settings-section-meta">Manage shared workspaces visible to all users.</div>
+                <div class="settings-section-meta">Manage workspaces and shared spaces.</div>
               </div>
             </div>
-            <div id="settingsSharedWorkspacesSection">
+            <div id="settingsWorkspacesSection" style="margin-bottom:24px">
+              <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
+                <div style="font-size:13px;font-weight:500;color:var(--text)">Workspaces</div>
+                <button class="sm-btn" onclick="showWorkspaceFormForSettings()">+ Add Workspace</button>
+              </div>
+              <div id="settingsWorkspacesList" style="display:flex;flex-direction:column;gap:4px"></div>
+              <div id="settingsWorkspacesEmpty" style="display:none;text-align:center;padding:16px 0;color:var(--muted);font-size:12px">No workspaces configured.</div>
+            </div>
+            <div style="border-top:1px solid var(--border);padding-top:20px" id="settingsSharedWorkspacesSection">
               <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
                 <div>
                   <div style="font-size:13px;font-weight:500;color:var(--text)">Shared Workspaces</div>
