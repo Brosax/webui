@@ -6826,6 +6826,21 @@ def handle_delete(handler, parsed) -> bool:
             return bad(handler, "Member not found", 404)
         return j(handler, {"success": True})
 
+    # DELETE /api/workflow/definitions/{workflow_id}
+    _trace_del_def_match = re.match(r"^/api/workflow/definitions/([^/]+)$", parsed.path or "")
+    if _trace_del_def_match:
+        workflow_id = _trace_del_def_match.group(1)
+        from api.workflow_trace import (
+            can_write_definition as _can_write_workflow_def,
+            delete_workflow_definition as _delete_workflow_def,
+        )
+        current_user = _current_user(handler)
+        if not _can_write_workflow_def(workflow_id, current_user):
+            return bad(handler, "Access denied", 403)
+        if not _delete_workflow_def(workflow_id):
+            return bad(handler, "Workflow definition not found", 404)
+        return j(handler, {"success": True})
+
     _m = re.match(r"^/api/tokens/(\d+)$", parsed.path or "")
     if _m:
         scope_err = _require_scope(handler, "chat")
@@ -8146,6 +8161,92 @@ def _handle_memory_read(handler):
     )
 
 
+def _assistant_normalize_deliver(value):
+    return "teams" if str(value or "").strip().lower() == "teams" else "local"
+
+
+def _assistant_preset_timestamp(job: dict, *keys):
+    for key in keys:
+        value = job.get(key)
+        if value is not None and value != "":
+            return value
+    return None
+
+
+def _assistant_bootstrap_presets(profile_home, assistant_cfg):
+    presets = assistant_cfg.get("assistants")
+    if isinstance(presets, list) and presets:
+        return presets
+    try:
+        from cron.jobs import list_jobs
+
+        jobs = list_jobs(include_disabled=True)
+    except Exception:
+        logger.debug("Failed to load assistant bootstrap cron jobs", exc_info=True)
+        return []
+    if not isinstance(jobs, list):
+        return []
+    defaults = {
+        "memory_injection": assistant_cfg.get("memory_injection", True) is not False,
+        "default_deliver": _assistant_normalize_deliver(assistant_cfg.get("default_deliver")),
+    }
+    bootstrapped = []
+    for job in jobs:
+        if not isinstance(job, dict) or not job.get("assistant_managed"):
+            continue
+        assistant_id = str(job.get("id") or "").strip()
+        if not assistant_id:
+            continue
+        created_at = _assistant_preset_timestamp(job, "created_at", "created", "updated_at", "last_run_at")
+        updated_at = _assistant_preset_timestamp(job, "updated_at", "modified_at", "last_run_at", "created_at")
+        bootstrapped.append(
+            {
+                "assistant_id": assistant_id,
+                "name": str(job.get("name") or "Untitled Assistant"),
+                "prompt": str(job.get("prompt") or ""),
+                "memory_injection": bool(
+                    job.get("assistant_memory_injection")
+                    if "assistant_memory_injection" in job
+                    else defaults["memory_injection"]
+                ),
+                "deliver": _assistant_normalize_deliver(job.get("deliver") or defaults["default_deliver"]),
+                "created_at": created_at,
+                "updated_at": updated_at,
+            }
+        )
+    return bootstrapped
+
+
+def _normalize_assistant_config(profile_home, assistant_cfg):
+    if not isinstance(assistant_cfg, dict):
+        assistant_cfg = {}
+    normalized = dict(assistant_cfg)
+    normalized["memory_injection"] = assistant_cfg.get("memory_injection", True) is not False
+    normalized["default_deliver"] = _assistant_normalize_deliver(assistant_cfg.get("default_deliver"))
+    raw_presets = assistant_cfg.get("assistants")
+    presets = raw_presets if isinstance(raw_presets, list) and raw_presets else _assistant_bootstrap_presets(profile_home, normalized)
+    cleaned = []
+    for idx, item in enumerate(presets or []):
+        if not isinstance(item, dict):
+            continue
+        assistant_id = str(item.get("assistant_id") or item.get("id") or "").strip()
+        if not assistant_id:
+            assistant_id = f"assistant-{idx + 1}"
+        cleaned.append(
+            {
+                "assistant_id": assistant_id,
+                "name": str(item.get("name") or "Untitled Assistant"),
+                "prompt": str(item.get("prompt") or ""),
+                "memory_injection": item.get("memory_injection", normalized["memory_injection"]) is not False,
+                "deliver": _assistant_normalize_deliver(item.get("deliver") or normalized["default_deliver"]),
+                "created_at": item.get("created_at"),
+                "updated_at": item.get("updated_at"),
+            }
+        )
+    normalized["assistants"] = cleaned
+    return normalized
+
+
 def _handle_profile_config_read(handler):
     profile_home = None
     try:
@@ -8155,9 +8256,7 @@ def _handle_profile_config_read(handler):
         cfg = read_profile_config(profile_home)
     except Exception as e:
         return bad(handler, f"Failed to load profile config: {e}", 500)
-    assistant_cfg = cfg.get("assistant", {})
-    if not isinstance(assistant_cfg, dict):
-        assistant_cfg = {}
+    assistant_cfg = _normalize_assistant_config(profile_home, cfg.get("assistant", {}))
     return j(
         handler,
         {
@@ -8176,12 +8275,10 @@ def _handle_profile_config_write(handler, body):
         assistant_cfg = body.get("assistant", body)
         if not isinstance(assistant_cfg, dict):
             return bad(handler, "assistant config must be an object")
-        saved = write_profile_config(profile_home, {"assistant": assistant_cfg})
+        saved = write_profile_config(profile_home, {"assistant": _normalize_assistant_config(profile_home, assistant_cfg)})
     except Exception as e:
         return bad(handler, f"Failed to save profile config: {e}", 500)
-    assistant_cfg = saved.get("assistant", {})
-    if not isinstance(assistant_cfg, dict):
-        assistant_cfg = {}
+    assistant_cfg = _normalize_assistant_config(profile_home, saved.get("assistant", {}))
     return j(
         handler,
         {

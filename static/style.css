@@ -3435,10 +3435,10 @@ main.main > .main-view:not([id="mainChat"]):not([id="mainSettings"]) .main-view-
 /* ── My Assistant workspace ───────────────────────────────────────────────── */
 #mainAssistant .assistant-body{padding:24px 32px;}
 #mainAssistant .assistant-workbench{
-  display:grid;
-  grid-template-columns:minmax(0,1fr) minmax(0,1.1fr);
+  display:flex;
+  flex-direction:column;
   gap:16px;
-  align-items:start;
+  align-items:stretch;
 }
 #mainAssistant .assistant-section{
   border:1px solid var(--border);
@@ -3447,8 +3447,6 @@ main.main > .main-view:not([id="mainChat"]):not([id="mainSettings"]) .main-view-
   padding:16px;
   min-width:0;
 }
-#mainAssistant .assistant-memory-section{grid-column:1 / -1;}
-#mainAssistant .assistant-cockpit-section{grid-column:1 / -1;}
 #mainAssistant .assistant-section-head{
   display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:12px;
 }
@@ -3488,43 +3486,30 @@ main.main > .main-view:not([id="mainChat"]):not([id="mainSettings"]) .main-view-
 #mainAssistant textarea:focus,
 #mainAssistant input:focus,
 #mainAssistant select:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px var(--focus-ring);}
-#mainAssistant .assistant-routine-list{display:flex;flex-direction:column;gap:8px;margin-bottom:12px;}
-#mainAssistant .assistant-routine-item{
-  display:flex;align-items:flex-start;justify-content:space-between;gap:12px;
-  padding:10px 12px;border:1px solid var(--border);border-radius:10px;
-  background:var(--sidebar);cursor:pointer;transition:border-color .15s,background .15s;
-}
-#mainAssistant .assistant-routine-item:hover{border-color:var(--border2);}
-#mainAssistant .assistant-routine-item.active{background:var(--accent-bg);border-color:var(--accent-bg-strong);}
-#mainAssistant .assistant-routine-item-main{min-width:0;flex:1;}
-#mainAssistant .assistant-routine-name{font-size:13px;font-weight:600;color:var(--text);margin-bottom:4px;word-break:break-word;}
-#mainAssistant .assistant-routine-meta{display:flex;flex-wrap:wrap;gap:6px;font-size:11px;color:var(--muted);}
-#mainAssistant .assistant-routine-actions{display:flex;gap:4px;flex-shrink:0;}
-#mainAssistant .assistant-badge{
-  display:inline-flex;align-items:center;padding:2px 7px;border-radius:999px;
-  border:1px solid var(--border);font-size:11px;font-weight:600;color:var(--muted);
-}
-#mainAssistant .assistant-badge.is-on{background:var(--accent-bg);color:var(--accent-text);border-color:var(--accent-bg-strong);}
-#mainAssistant .assistant-routine-form{display:flex;flex-direction:column;gap:12px;}
+#mainAssistant .assistant-preset-form{display:flex;flex-direction:column;gap:12px;}
 #mainAssistant .assistant-form-row{display:flex;flex-direction:column;gap:6px;}
 #mainAssistant .assistant-form-inline{flex-direction:row;flex-wrap:wrap;gap:16px;align-items:center;}
-#mainAssistant .assistant-schedule-modes{display:flex;gap:6px;flex-wrap:wrap;}
-#mainAssistant .assistant-mode-btn{
-  border:1px solid var(--btn-secondary-border);border-radius:999px;background:var(--btn-secondary-bg);color:var(--btn-secondary-text);
-  padding:6px 10px;font-size:12px;cursor:pointer;transition:background .15s,border-color .15s,color .15s;
-}
-#mainAssistant .assistant-mode-btn:hover{background:var(--btn-secondary-hover-bg);border-color:var(--btn-secondary-hover-border);color:var(--btn-secondary-hover-text);}
-#mainAssistant .assistant-mode-btn.active{background:var(--btn-primary-bg);border-color:var(--btn-primary-border);color:var(--btn-primary-text);}
-#mainAssistant .assistant-schedule-pane{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:8px;}
-#mainAssistant .assistant-schedule-pane > *{flex-shrink:0;}
 #mainAssistant .assistant-team-actions{display:flex;gap:8px;align-items:center;flex-wrap:wrap;}
 #mainAssistant .assistant-defaults{
   display:flex;flex-wrap:wrap;gap:12px;align-items:center;margin-top:12px;
   padding-top:12px;border-top:1px solid var(--border);
 }
 #mainAssistant .assistant-defaults .btn{margin-left:auto;}
+#mainAssistant .assistant-inline-empty{
+  border:1px dashed var(--border);
+  border-radius:10px;
+  min-height:220px;
+  padding:28px 24px;
+}
+
+#panelAssistant .assistant-list{padding:0 8px 8px;}
+#panelAssistant .assistant-session-item{min-height:0;margin-bottom:0;}
+#panelAssistant .assistant-session-item .assistant-session-text{min-width:0;flex:1;}
+#panelAssistant .assistant-session-title{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+#panelAssistant .assistant-session-item .assistant-session-actions{right:6px;}
+#panelAssistant .assistant-session-item:has(.assistant-title-input) .assistant-session-actions{display:none;}
+
 @media (max-width: 1100px){
-  #mainAssistant .assistant-workbench{grid-template-columns:1fr;}
   #mainAssistant .assistant-memory-grid{grid-template-columns:1fr;}
   #mainAssistant .assistant-defaults .btn{margin-left:0;}
 }
@@ -4141,7 +4126,47 @@ main.main.showing-logs > #mainLogs{display:flex;}
 .workflow-list {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 2px;
+  min-height: 0;
+}
+
+.workflow-list-empty {
+  padding: 12px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.workflow-session-item {
+  min-height: 0;
+  margin-bottom: 0;
+}
+
+.workflow-session-item .workflow-session-text {
+  min-width: 0;
+  flex: 1;
+}
+
+.workflow-session-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workflow-session-meta {
+  font-size: 11px;
+}
+
+.workflow-session-item:hover .workflow-session-meta,
+.workflow-session-item.active .workflow-session-meta {
+  opacity: .8;
+}
+
+.workflow-session-item .workflow-session-actions {
+  right: 6px;
+}
+
+.workflow-session-item:has(.workflow-title-input) .workflow-session-actions {
+  display: none;
 }
 
 .workflow-card {
@@ -4208,6 +4233,36 @@ main.main.showing-logs > #mainLogs{display:flex;}
   flex-wrap: wrap;
   padding: 10px 12px;
   border-bottom: 1px solid var(--border-subtle, rgba(0,0,0,.08));
+}
+
+.workflow-create-menu {
+  position: fixed;
+  z-index: 2000;
+  min-width: 182px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+  padding: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.workflow-create-menu-item {
+  width: 100%;
+  text-align: left;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  font-size: 12px;
+  padding: 8px 10px;
+  cursor: pointer;
+}
+
+.workflow-create-menu-item:hover {
+  background: var(--hover-bg, rgba(0, 0, 0, 0.06));
 }
 
 .workflow-editor {

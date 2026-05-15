@@ -132,6 +132,17 @@
       </div>
       <div class="cron-list" id="cronList"><div style="padding:12px;color:var(--muted);font-size:12px" data-i18n="loading">Loading...</div></div>
     </div>
+    <!-- Assistant presets panel -->
+    <div class="panel-view" id="panelAssistant">
+      <div class="panel-head">
+        <span data-i18n="tab_assistant">My Assistant</span>
+        <div class="panel-head-actions">
+          <button class="panel-head-btn has-tooltip has-tooltip--bottom" id="btnAssistantCreate" onclick="createAssistantPreset()" data-tooltip="New assistant" aria-label="New assistant"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>
+        </div>
+      </div>
+      <div class="assistant-search sidebar-search"><svg class="sidebar-search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg><input id="assistantSearch" placeholder="Filter assistants..." oninput="filterAssistantPresets()" autocomplete="off"></div>
+      <div class="session-list assistant-list" id="assistantList"></div>
+    </div>
     <!-- Kanban panel -->
     <div class="panel-view" id="panelKanban">
       <div class="panel-head">
@@ -187,9 +198,10 @@
         <div class="panel-head-actions">
           <button class="panel-head-btn has-tooltip has-tooltip--bottom" id="workflowRefreshBtn" onclick="loadWorkflowTasks()" data-tooltip="Refresh" aria-label="Refresh"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg></button>
           <button class="panel-head-btn has-tooltip has-tooltip--bottom" id="workflowCollapseBtn" onclick="toggleTraceTimeline()" data-tooltip="Collapse/Expand" aria-label="Collapse/Expand" style="display:none"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg></button>
-          <button class="panel-head-btn has-tooltip has-tooltip--bottom" onclick="openWorkflowCreate()" data-tooltip="New workflow" data-i18n-title="workflow_new_definition" aria-label="New workflow"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>
+          <button class="panel-head-btn has-tooltip has-tooltip--bottom" onclick="openWorkflowCreateMenu(event)" data-tooltip="New workflow" data-i18n-title="workflow_new_definition" aria-label="New workflow"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>
         </div>
       </div>
+      <div class="workflow-search sidebar-search"><svg class="sidebar-search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg><input id="workflowSearch" placeholder="Filter workflows..." oninput="filterWorkflowDefinitions()" autocomplete="off"></div>
       <div class="workflow-list" id="workflowList"><div style="padding:12px;color:var(--muted);font-size:12px" data-i18n="loading">Loading...</div></div>
     </div>
     <!-- Todo panel -->
@@ -693,14 +705,44 @@
     </div>
     <div id="mainAssistant" class="main-view">
       <div class="main-view-header">
-        <div class="main-view-title" data-i18n="tab_assistant">My Assistant</div>
+        <div class="main-view-title" id="assistantDetailTitle" data-i18n="tab_assistant">My Assistant</div>
         <div class="main-view-actions">
           <button id="btnAssistantRefresh" class="panel-head-btn has-tooltip has-tooltip--bottom" data-tooltip="Refresh" aria-label="Refresh" onclick="loadAssistant(true)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg></button>
-          <button id="btnAssistantNew" class="panel-head-btn has-tooltip has-tooltip--bottom" data-tooltip="New assistant routine" aria-label="New assistant routine" onclick="openAssistantRoutineForm()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>
         </div>
       </div>
       <div class="main-view-body assistant-body">
         <div class="assistant-workbench">
+          <section class="assistant-section assistant-detail-section">
+            <div class="assistant-section-head">
+              <div>
+                <div class="assistant-section-title" id="assistantPresetHeading">Assistant details</div>
+                <div class="assistant-section-meta" id="assistantPresetMeta">Select an assistant preset from the sidebar.</div>
+              </div>
+              <div class="assistant-section-actions">
+                <button class="panel-head-btn has-tooltip has-tooltip--bottom" data-tooltip="Save assistant" aria-label="Save assistant" onclick="saveCurrentAssistantPreset()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg></button>
+              </div>
+            </div>
+            <div id="assistantPresetEmpty" class="main-view-empty assistant-inline-empty">
+              <svg class="main-view-empty-icon" width="52" height="52" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 2l1.8 4.6L18 8.4l-4.2 1.8L12 15l-1.8-4.8L6 8.4l4.2-1.8L12 2z"/><path d="M18.5 15.5l.7 1.8 1.8.7-1.8.7-.7 1.8-.7-1.8-1.8-.7 1.8-.7z"/></svg>
+              <div class="main-view-empty-title">No assistant selected</div>
+              <div class="main-view-empty-sub">Create a preset from the sidebar or pick one to edit its prompt, memory injection, and delivery target.</div>
+            </div>
+            <form id="assistantPresetForm" class="assistant-preset-form" style="display:none" onsubmit="event.preventDefault(); saveCurrentAssistantPreset();">
+              <div class="assistant-form-row">
+                <label for="assistantPresetName">Name</label>
+                <input id="assistantPresetName" type="text" autocomplete="off" placeholder="Untitled Assistant">
+              </div>
+              <div class="assistant-form-row">
+                <label for="assistantPresetPrompt">Prompt</label>
+                <textarea id="assistantPresetPrompt" rows="8" spellcheck="false" placeholder="What the assistant should do."></textarea>
+              </div>
+              <div class="assistant-form-row assistant-form-inline">
+                <label style="display:flex;align-items:center;gap:8px;cursor:pointer"><input id="assistantPresetMemoryInjection" type="checkbox" checked> <span>Inject memory</span></label>
+                <label style="display:flex;align-items:center;gap:8px;cursor:pointer"><input id="assistantPresetDeliverTeams" type="checkbox"> <span>Deliver to Teams</span></label>
+              </div>
+              <div id="assistantPresetError" class="detail-form-error" style="display:none"></div>
+            </form>
+          </section>
           <section class="assistant-section assistant-memory-section">
             <div class="assistant-section-head">
               <div>
@@ -736,67 +778,6 @@
               </div>
             </div>
             <textarea id="assistantCockpitDraft" rows="10" spellcheck="false" placeholder="Generated draft appears here..."></textarea>
-          </section>
-          <section class="assistant-section assistant-routines-section">
-            <div class="assistant-section-head">
-              <div>
-                <div class="assistant-section-title">Routines</div>
-                <div class="assistant-section-meta" id="assistantRoutinesMeta">—</div>
-              </div>
-              <div class="assistant-section-actions">
-                <button class="panel-head-btn has-tooltip has-tooltip--bottom" data-tooltip="Run now" aria-label="Run now" onclick="runSelectedAssistantRoutine()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="5 3 19 12 5 21 5 3"/></svg></button>
-                <button class="panel-head-btn has-tooltip has-tooltip--bottom" data-tooltip="Save routine" aria-label="Save routine" onclick="saveAssistantRoutine()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg></button>
-              </div>
-            </div>
-            <div id="assistantRoutineList" class="assistant-routine-list"></div>
-            <form id="assistantRoutineForm" class="assistant-routine-form" onsubmit="event.preventDefault(); saveAssistantRoutine();">
-              <div class="assistant-form-row">
-                <label for="assistantRoutineName">Name</label>
-                <input id="assistantRoutineName" type="text" autocomplete="off" placeholder="Optional">
-              </div>
-              <div class="assistant-form-row">
-                <label for="assistantRoutinePrompt">Prompt</label>
-                <textarea id="assistantRoutinePrompt" rows="6" spellcheck="false" placeholder="What the assistant should do."></textarea>
-              </div>
-              <div class="assistant-form-row">
-                <label>Schedule</label>
-                <div id="assistantScheduleModes" class="assistant-schedule-modes">
-                  <button type="button" class="assistant-mode-btn active" data-mode="daily" onclick="setAssistantScheduleMode('daily')" data-i18n="cron_schedule_mode_daily">每天</button>
-                  <button type="button" class="assistant-mode-btn" data-mode="weekly" onclick="setAssistantScheduleMode('weekly')" data-i18n="cron_schedule_mode_weekly">每周</button>
-                  <button type="button" class="assistant-mode-btn" data-mode="interval" onclick="setAssistantScheduleMode('interval')" data-i18n="cron_schedule_mode_interval">间隔</button>
-                  <button type="button" class="assistant-mode-btn" data-mode="custom" onclick="setAssistantScheduleMode('custom')" data-i18n="cron_schedule_mode_custom">自定义</button>
-                </div>
-                <div id="assistantScheduleDaily" class="assistant-schedule-pane">
-                  <label for="assistantDailyTime">Time</label>
-                  <input id="assistantDailyTime" type="time" value="09:00">
-                </div>
-                <div id="assistantScheduleWeekly" class="assistant-schedule-pane" style="display:none">
-                  <label for="assistantWeeklyDow">Day</label>
-                  <select id="assistantWeeklyDow">
-                    <option value="1">Mon</option><option value="2">Tue</option><option value="3">Wed</option><option value="4">Thu</option><option value="5">Fri</option><option value="6">Sat</option><option value="0">Sun</option>
-                  </select>
-                  <label for="assistantWeeklyTime">Time</label>
-                  <input id="assistantWeeklyTime" type="time" value="09:00">
-                </div>
-                <div id="assistantScheduleInterval" class="assistant-schedule-pane" style="display:none">
-                  <input id="assistantIntervalValue" type="number" min="1" value="1">
-                  <select id="assistantIntervalUnit">
-                    <option value="minutes">Minutes</option>
-                    <option value="hours">Hours</option>
-                    <option value="days">Days</option>
-                  </select>
-                </div>
-                <div id="assistantScheduleCustom" class="assistant-schedule-pane" style="display:none">
-                  <input id="assistantCustomSchedule" type="text" placeholder="0 9 * * *">
-                </div>
-              </div>
-              <div class="assistant-form-row assistant-form-inline">
-                <label style="display:flex;align-items:center;gap:8px;cursor:pointer"><input id="assistantMemoryInjection" type="checkbox" checked> <span>Inject memory</span></label>
-                <label style="display:flex;align-items:center;gap:8px;cursor:pointer"><input id="assistantDeliverTeams" type="checkbox"> <span>Send results to Teams</span></label>
-              </div>
-              <div id="assistantRoutineError" class="detail-form-error" style="display:none"></div>
-              <input type="hidden" id="assistantRoutineId" value="">
-            </form>
           </section>
           <section class="assistant-section assistant-teams-section">
             <div class="assistant-section-head">

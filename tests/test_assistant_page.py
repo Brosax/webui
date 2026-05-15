@@ -44,23 +44,119 @@ def test_assistant_profile_config_roundtrip(tmp_path, monkeypatch):
     handler = _JSONHandler()
     routes._handle_profile_config_write(
         handler,
-        {"assistant": {"memory_injection": False, "default_deliver": "teams"}},
+        {
+            "assistant": {
+                "memory_injection": False,
+                "default_deliver": "teams",
+                "assistants": [
+                    {
+                        "assistant_id": "assistant-alpha",
+                        "name": "Alpha",
+                        "prompt": "Draft the update.",
+                        "memory_injection": True,
+                        "deliver": "teams",
+                        "created_at": "2026-05-15T10:00:00Z",
+                        "updated_at": "2026-05-15T11:00:00Z",
+                    }
+                ],
+            }
+        },
     )
     assert handler.status == 200
     body = _payload(handler)
     assert body["ok"] is True
     assert body["assistant"]["memory_injection"] is False
     assert body["assistant"]["default_deliver"] == "teams"
+    assert body["assistant"]["assistants"][0]["assistant_id"] == "assistant-alpha"
+    assert body["assistant"]["assistants"][0]["prompt"] == "Draft the update."
 
     config_text = (tmp_path / "config.yaml").read_text(encoding="utf-8")
     assert "assistant:" in config_text
     assert "memory_injection: false" in config_text
+    assert "assistant-alpha" in config_text
 
     read_handler = _JSONHandler()
     routes._handle_profile_config_read(read_handler)
     read_body = _payload(read_handler)
     assert read_body["assistant"]["memory_injection"] is False
     assert read_body["assistant"]["default_deliver"] == "teams"
+    assert read_body["assistant"]["assistants"][0]["deliver"] == "teams"
+
+
+def test_assistant_profile_config_bootstraps_from_legacy_crons(tmp_path, monkeypatch):
+    import api.profiles as profiles
+    import api.routes as routes
+
+    cron_pkg = types.ModuleType("cron")
+    cron_pkg.__path__ = []
+    cron_jobs = types.ModuleType("cron.jobs")
+    cron_jobs.list_jobs = lambda include_disabled=True: [
+        {
+            "id": "job-legacy-1",
+            "name": "Morning draft",
+            "prompt": "Summarize today's priorities.",
+            "deliver": "teams",
+            "assistant_managed": True,
+            "assistant_memory_injection": False,
+            "created_at": "2026-05-14T08:00:00Z",
+            "updated_at": "2026-05-15T08:30:00Z",
+        }
+    ]
+
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+    monkeypatch.setitem(sys.modules, "cron", cron_pkg)
+    monkeypatch.setitem(sys.modules, "cron.jobs", cron_jobs)
+    (tmp_path / "config.yaml").write_text(
+        "assistant:\n  memory_injection: true\n  default_deliver: local\n",
+        encoding="utf-8",
+    )
+
+    handler = _JSONHandler()
+    routes._handle_profile_config_read(handler)
+    assert handler.status == 200
+    body = _payload(handler)
+    presets = body["assistant"]["assistants"]
+    assert len(presets) == 1
+    assert presets[0] == {
+        "assistant_id": "job-legacy-1",
+        "name": "Morning draft",
+        "prompt": "Summarize today's priorities.",
+        "memory_injection": False,
+        "deliver": "teams",
+        "created_at": "2026-05-14T08:00:00Z",
+        "updated_at": "2026-05-15T08:30:00Z",
+    }
+
+
+def test_assistant_profile_config_save_does_not_require_schedule(tmp_path, monkeypatch):
+    import api.profiles as profiles
+    import api.routes as routes
+
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+
+    handler = _JSONHandler()
+    routes._handle_profile_config_write(
+        handler,
+        {
+            "assistant": {
+                "memory_injection": True,
+                "default_deliver": "local",
+                "assistants": [
+                    {
+                        "assistant_id": "assistant-no-schedule",
+                        "name": "No Schedule",
+                        "prompt": "Stay manual.",
+                        "memory_injection": True,
+                        "deliver": "local",
+                    }
+                ],
+            }
+        },
+    )
+    assert handler.status == 200
+    body = _payload(handler)
+    assert body["assistant"]["assistants"][0]["assistant_id"] == "assistant-no-schedule"
+    assert "schedule" not in body["assistant"]["assistants"][0]
 
 
 def test_assistant_cron_subprocess_injects_memory_into_prompt(tmp_path, monkeypatch):
@@ -223,12 +319,32 @@ def test_my_assistant_static_hooks_exist():
     css = (ROOT / "static" / "style.css").read_text(encoding="utf-8")
 
     assert 'data-panel="assistant"' in index
+    assert 'id="panelAssistant"' in index
+    assert 'id="assistantSearch"' in index
+    assert 'id="assistantList"' in index
     assert 'id="mainAssistant"' in index
+    assert 'id="assistantPresetForm"' in index
+    assert 'id="assistantPresetPrompt"' in index
+    assert 'id="assistantPresetMemoryInjection"' in index
+    assert 'id="assistantPresetDeliverTeams"' in index
     assert "function loadAssistant(" in panels
-    assert "function saveAssistantRoutine(" in panels
+    assert "function filterAssistantPresets(" in panels
+    assert "function renderAssistantPresets(" in panels
+    assert "function createAssistantPreset(" in panels
+    assert "function deleteAssistantPreset(" in panels
+    assert "_startAssistantInlineRename" in panels
+    assert "assistant-action-menu" in panels
     assert "function saveAssistantConfig(" in panels
     assert "function generateAssistantCockpit(" in panels
     assert "function applyAssistantDraftToTeams(" in panels
     assert "assistantCockpitDraft" in index
+    assert "session-item assistant-session-item" in panels
+    assert "assistant-session-actions" in panels
+    assert "assistant-session-item" in css
+    assert "assistant-routine-item" not in index
+    assert "assistantRoutineForm" not in index
+    assert "assistantScheduleDaily" not in index
+    assert "runSelectedAssistantRoutine" not in panels
+    assert "saveAssistantRoutine" not in panels
     assert "assistantManaged" not in panels  # spelling should stay snake_case
     assert "showing-assistant" in css

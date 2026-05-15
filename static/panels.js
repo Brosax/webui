@@ -23,12 +23,16 @@ let _cronList = null; // cached cron jobs (array)
 let _currentCronDetail = null; // full cron job object
 let _cronMode = 'empty'; // 'empty' | 'read' | 'create' | 'edit'
 let _cronPreFormDetail = null; // snapshot of prior selection when entering a form
-let _assistantJobs = []; // assistant page job cache
-let _assistantSelectedJobId = '';
+let _assistantPresets = [];
+let _assistantCurrentId = '';
 let _assistantData = null; // memory/config/status payload cache
-let _assistantScheduleMode = 'daily';
+let _assistantFilterQuery = '';
 let _assistantTeamsConfigured = false;
 let _assistantCockpitKind = 'today';
+let _assistantActionMenu = null;
+let _assistantActionAnchor = null;
+let _assistantActionAssistantId = null;
+let _assistantRenamingId = null;
 let _currentWorkspaceDetail = null; // { path, name, is_default }
 let _workspaceMode = 'empty'; // 'empty' | 'read' | 'create' | 'edit'
 let _workspacePreFormDetail = null;
@@ -3533,159 +3537,57 @@ async function submitMemorySave() {
 
 // ── My Assistant panel ──────────────────────────────────────────────────────
 
-function _assistantScheduleDefaults(cfg) {
+function _assistantConfigDefaults(cfg) {
   const assistant = (cfg && cfg.assistant) || {};
   return {
     memory_injection: assistant.memory_injection !== false,
     default_deliver: assistant.default_deliver === 'teams' ? 'teams' : 'local',
+    assistants: Array.isArray(assistant.assistants) ? assistant.assistants : [],
   };
 }
 
-function _assistantScheduleModeButtons() {
-  return Array.from(document.querySelectorAll('#assistantScheduleModes .assistant-mode-btn'));
+function _assistantGenerateId() {
+  return `assistant-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
-function setAssistantScheduleMode(mode) {
-  const next = ['daily', 'weekly', 'interval', 'custom'].includes(mode) ? mode : 'daily';
-  _assistantScheduleMode = next;
-  _assistantScheduleModeButtons().forEach(btn => btn.classList.toggle('active', btn.dataset.mode === next));
-  const panes = {
-    daily: $('assistantScheduleDaily'),
-    weekly: $('assistantScheduleWeekly'),
-    interval: $('assistantScheduleInterval'),
-    custom: $('assistantScheduleCustom'),
+function _assistantNormalizeDeliver(value, fallback = 'local') {
+  return String(value || fallback).trim().toLowerCase() === 'teams' ? 'teams' : 'local';
+}
+
+function _assistantNormalizePreset(raw, defaults = _assistantConfigDefaults(_assistantData && _assistantData.config)) {
+  const nowIso = new Date().toISOString();
+  return {
+    assistant_id: String(raw && (raw.assistant_id || raw.id) || _assistantGenerateId()).trim(),
+    name: String(raw && raw.name || 'Untitled Assistant'),
+    prompt: String(raw && raw.prompt || ''),
+    memory_injection: raw && raw.memory_injection !== undefined ? !!raw.memory_injection : defaults.memory_injection,
+    deliver: _assistantNormalizeDeliver(raw && raw.deliver, defaults.default_deliver),
+    created_at: raw && raw.created_at ? raw.created_at : nowIso,
+    updated_at: raw && raw.updated_at ? raw.updated_at : nowIso,
   };
-  Object.entries(panes).forEach(([key, el]) => {
-    if (el) el.style.display = key === next ? '' : 'none';
-  });
 }
 
-function _assistantScheduleExpressionFromForm() {
-  const dailyTime = $('assistantDailyTime');
-  const weeklyDow = $('assistantWeeklyDow');
-  const weeklyTime = $('assistantWeeklyTime');
-  const intervalValue = $('assistantIntervalValue');
-  const intervalUnit = $('assistantIntervalUnit');
-  const customSchedule = $('assistantCustomSchedule');
-  const [hour = '09', minute = '00'] = String((dailyTime && dailyTime.value) || '09:00').split(':');
-  const hh = String(parseInt(hour, 10) || 0);
-  const mm = String(parseInt(minute, 10) || 0);
-  if (_assistantScheduleMode === 'weekly') {
-    const [wh = '09', wm = '00'] = String((weeklyTime && weeklyTime.value) || '09:00').split(':');
-    const dow = String((weeklyDow && weeklyDow.value) || '1');
-    return `${parseInt(wm, 10) || 0} ${parseInt(wh, 10) || 0} * * ${dow}`;
-  }
-  if (_assistantScheduleMode === 'interval') {
-    const value = Math.max(1, parseInt((intervalValue && intervalValue.value) || '1', 10) || 1);
-    const unit = (intervalUnit && intervalUnit.value) || 'minutes';
-    if (unit === 'hours') return `0 */${value} * * *`;
-    if (unit === 'days') return `0 0 */${value} * *`;
-    return `*/${value} * * * *`;
-  }
-  if (_assistantScheduleMode === 'custom') {
-    return String((customSchedule && customSchedule.value) || '').trim();
-  }
-  return `${parseInt(mm, 10) || 0} ${parseInt(hh, 10) || 0} * * *`;
+function _assistantBuildConfigPayload() {
+  const defaults = _assistantConfigDefaults(_assistantData && _assistantData.config);
+  return {
+    memory_injection: !!(($('assistantConfigMemoryInjection') || {}).checked),
+    default_deliver: (($('assistantConfigDefaultTeams') || {}).checked) ? 'teams' : 'local',
+    assistants: _assistantPresets.map((item) => _assistantNormalizePreset(item, defaults)),
+  };
 }
 
-function _assistantScheduleModeFromExpression(expr) {
-  const schedule = String(expr || '').trim();
-  if (!schedule) return 'daily';
-  if (/^\*\/\d+\s+\*\s+\*\s+\*\s+\*$/.test(schedule) || /^0\s+\*\/\d+\s+\*\s+\*\s+\*$/.test(schedule) || /^0\s+0\s+\*\/\d+\s+\*\s+\*$/.test(schedule)) {
-    return 'interval';
+async function _persistAssistantConfig(opts = {}) {
+  const payload = _assistantBuildConfigPayload();
+  const saved = await api('/api/profile/config', {method:'POST', body: JSON.stringify({assistant: payload})});
+  _assistantData = _assistantData || {};
+  _assistantData.config = saved || {assistant: payload};
+  const nextDefaults = _assistantConfigDefaults(saved || {assistant: payload});
+  _assistantPresets = nextDefaults.assistants.map((item) => _assistantNormalizePreset(item, nextDefaults));
+  if (_assistantCurrentId && !_assistantPresets.find((item) => item.assistant_id === _assistantCurrentId)) {
+    _assistantCurrentId = _assistantPresets[0] ? _assistantPresets[0].assistant_id : '';
   }
-  if (/^\d+\s+\d+\s+\*\s+\*\s+\d+$/.test(schedule)) return 'weekly';
-  if (/^\d+\s+\d+\s+\*\s+\*\s+\*$/.test(schedule)) return 'daily';
-  return 'custom';
-}
-
-function _assistantJobScheduleFields(job) {
-  const schedule = String((job && (job.schedule_display || (job.schedule && job.schedule.expression) || job.schedule || '')) || '').trim();
-  const mode = _assistantScheduleModeFromExpression(schedule);
-  const parts = schedule.split(/\s+/);
-  if (mode === 'weekly' && parts.length >= 5) {
-    return { mode, time: `${String(parts[1]).padStart(2, '0')}:${String(parts[0]).padStart(2, '0')}`, dow: String(parts[4]) };
-  }
-  if (mode === 'daily' && parts.length >= 5) {
-    return { mode, time: `${String(parts[1]).padStart(2, '0')}:${String(parts[0]).padStart(2, '0')}` };
-  }
-  if (mode === 'interval') {
-    let match = schedule.match(/^\*\/(\d+)\s+\*\s+\*\s+\*\s+\*$/);
-    if (match) return { mode, value: match[1], unit: 'minutes' };
-    match = schedule.match(/^0\s+\*\/(\d+)\s+\*\s+\*\s+\*$/);
-    if (match) return { mode, value: match[1], unit: 'hours' };
-    match = schedule.match(/^0\s+0\s+\*\/(\d+)\s+\*\s+\*$/);
-    if (match) return { mode, value: match[1], unit: 'days' };
-  }
-  return { mode, schedule };
-}
-
-function _assistantSetFormFromJob(job) {
-  const isAssistant = !!(job && job.assistant_managed);
-  const selected = job ? String(job.id || '') : '';
-  _assistantSelectedJobId = selected;
-  const idEl = $('assistantRoutineId');
-  const nameEl = $('assistantRoutineName');
-  const promptEl = $('assistantRoutinePrompt');
-  const memoryEl = $('assistantMemoryInjection');
-  const deliverEl = $('assistantDeliverTeams');
-  const customScheduleEl = $('assistantCustomSchedule');
-  const dailyTimeEl = $('assistantDailyTime');
-  const weeklyDowEl = $('assistantWeeklyDow');
-  const weeklyTimeEl = $('assistantWeeklyTime');
-  const intervalValueEl = $('assistantIntervalValue');
-  const intervalUnitEl = $('assistantIntervalUnit');
-  if (idEl) idEl.value = selected;
-  if (nameEl) nameEl.value = (job && job.name) || '';
-  if (promptEl) promptEl.value = (job && job.prompt) || '';
-  const defaults = _assistantScheduleDefaults(_assistantData && _assistantData.config);
-  if (memoryEl) memoryEl.checked = job && job.assistant_memory_injection !== undefined ? !!job.assistant_memory_injection : defaults.memory_injection;
-  if (deliverEl) deliverEl.checked = (job && job.deliver) === 'teams' || (!job && defaults.default_deliver === 'teams');
-  const fields = _assistantJobScheduleFields(job || {});
-  _assistantScheduleMode = fields.mode || 'daily';
-  setAssistantScheduleMode(_assistantScheduleMode);
-  if (fields.mode === 'weekly') {
-    if (weeklyDowEl && fields.dow !== undefined) weeklyDowEl.value = String(fields.dow);
-    if (weeklyTimeEl && fields.time) weeklyTimeEl.value = fields.time;
-  } else if (fields.mode === 'interval') {
-    if (intervalValueEl && fields.value) intervalValueEl.value = fields.value;
-    if (intervalUnitEl && fields.unit) intervalUnitEl.value = fields.unit;
-  } else if (fields.mode === 'custom') {
-    if (customScheduleEl) customScheduleEl.value = fields.schedule || '';
-  } else if (dailyTimeEl && fields.time) {
-    dailyTimeEl.value = fields.time;
-  }
-  if (isAssistant && nameEl) {
-    nameEl.placeholder = 'Assistant routine';
-  }
-  const list = document.querySelectorAll('.assistant-routine-item');
-  list.forEach(el => el.classList.toggle('active', el.dataset.jobId === selected));
-}
-
-function copyAssistantRoutine(jobId) {
-  const job = _assistantJobs.find(j => String(j.id) === String(jobId));
-  if (!job) return;
-  openAssistantRoutineForm({
-    ...job,
-    id: '',
-    assistant_managed: true,
-    name: (job.name || 'Routine') + ' (copy)',
-  });
-}
-
-function openAssistantRoutineForm(job) {
-  _assistantSetFormFromJob(job || null);
-  const promptEl = $('assistantRoutinePrompt');
-  if (promptEl) promptEl.focus();
-}
-
-function _assistantSortedJobs(jobs) {
-  return [...(jobs || [])].sort((a, b) => {
-    const ap = !!(a && a.assistant_managed);
-    const bp = !!(b && b.assistant_managed);
-    if (ap !== bp) return ap ? -1 : 1;
-    return String(a && a.name || '').localeCompare(String(b && b.name || ''));
-  });
+  if (!opts.skipRender) renderAssistantPresets();
+  return saved;
 }
 
 function _renderAssistantMemory(data) {
@@ -3711,6 +3613,343 @@ function _renderAssistantTeamsStatus(gateway) {
   }
 }
 
+function _assistantCurrentPreset() {
+  return _assistantPresets.find((item) => item.assistant_id === _assistantCurrentId) || null;
+}
+
+function _assistantUpdateTitle() {
+  const titleEl = $('assistantDetailTitle');
+  const current = _assistantCurrentPreset();
+  if (titleEl) titleEl.textContent = current ? current.name : 'My Assistant';
+}
+
+function _assistantFormatTimestamp(value) {
+  if (!value) return 'Updated just now';
+  let dt = null;
+  if (typeof value === 'number') dt = new Date(value * 1000);
+  else {
+    const numeric = Number(value);
+    dt = Number.isFinite(numeric) ? new Date(numeric * 1000) : new Date(value);
+  }
+  if (!dt || Number.isNaN(dt.getTime())) return 'Updated just now';
+  return dt.toLocaleString();
+}
+
+function _assistantPresetMetaText(item) {
+  if (!item) return 'Select an assistant preset from the sidebar.';
+  return `${item.deliver === 'teams' ? 'teams' : 'local'} · ${_assistantFormatTimestamp(item.updated_at)}`;
+}
+
+function _assistantFilteredPresets() {
+  const query = String(_assistantFilterQuery || '').trim().toLowerCase();
+  if (!query) return _assistantPresets;
+  return _assistantPresets.filter((item) => [item.name, item.assistant_id, item.prompt].some((value) => String(value || '').toLowerCase().includes(query)));
+}
+
+function _assistantSetCurrent(id) {
+  _assistantCurrentId = id || '';
+  renderAssistantPresets();
+}
+
+function _assistantPopulateForm() {
+  const current = _assistantCurrentPreset();
+  const empty = $('assistantPresetEmpty');
+  const form = $('assistantPresetForm');
+  const heading = $('assistantPresetHeading');
+  const meta = $('assistantPresetMeta');
+  const nameEl = $('assistantPresetName');
+  const promptEl = $('assistantPresetPrompt');
+  const memEl = $('assistantPresetMemoryInjection');
+  const deliverEl = $('assistantPresetDeliverTeams');
+  if (!current) {
+    if (empty) empty.style.display = '';
+    if (form) form.style.display = 'none';
+    if (heading) heading.textContent = 'Assistant details';
+    if (meta) meta.textContent = 'Select an assistant preset from the sidebar.';
+    _assistantUpdateTitle();
+    return;
+  }
+  if (empty) empty.style.display = 'none';
+  if (form) form.style.display = '';
+  if (heading) heading.textContent = current.name || 'Untitled Assistant';
+  if (meta) meta.textContent = _assistantPresetMetaText(current);
+  if (nameEl) nameEl.value = current.name || '';
+  if (promptEl) promptEl.value = current.prompt || '';
+  if (memEl) memEl.checked = !!current.memory_injection;
+  if (deliverEl) deliverEl.checked = current.deliver === 'teams';
+  _assistantUpdateTitle();
+}
+
+function _assistantBuildAction(label, meta, icon, onSelect, extraClass = '') {
+  const opt = document.createElement('button');
+  opt.type = 'button';
+  opt.className = 'ws-opt session-action-opt' + (extraClass ? ` ${extraClass}` : '');
+  opt.innerHTML =
+    `<span class="ws-opt-action">`
+      + `<span class="ws-opt-icon">${icon}</span>`
+      + `<span class="session-action-copy">`
+        + `<span class="ws-opt-name">${esc(label)}</span>`
+        + (meta ? `<span class="session-action-meta">${esc(meta)}</span>` : '')
+      + `</span>`
+    + `</span>`;
+  opt.onclick = async(event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    await onSelect();
+  };
+  return opt;
+}
+
+function _positionAssistantActionMenu(anchorEl) {
+  if (!_assistantActionMenu || !anchorEl) return;
+  const rect = anchorEl.getBoundingClientRect();
+  const menuW = Math.min(280, Math.max(220, _assistantActionMenu.scrollWidth || 220));
+  let left = rect.right - menuW;
+  if (left < 8) left = 8;
+  if (left + menuW > window.innerWidth - 8) left = window.innerWidth - menuW - 8;
+  _assistantActionMenu.style.left = left + 'px';
+  const menuH = _assistantActionMenu.offsetHeight || 0;
+  let top = rect.bottom + 6;
+  if (top + menuH > window.innerHeight - 8 && rect.top > menuH + 12) top = rect.top - menuH - 6;
+  if (top < 8) top = 8;
+  _assistantActionMenu.style.top = top + 'px';
+}
+
+function closeAssistantActionMenu() {
+  if (_assistantActionMenu) {
+    _assistantActionMenu.remove();
+    _assistantActionMenu = null;
+  }
+  if (_assistantActionAnchor) {
+    _assistantActionAnchor.classList.remove('active');
+    const row = _assistantActionAnchor.closest('.assistant-session-item');
+    if (row) row.classList.remove('menu-open');
+  }
+  _assistantActionAnchor = null;
+  _assistantActionAssistantId = null;
+}
+
+function _openAssistantActionMenu(item, anchorEl) {
+  if (!item || !anchorEl) return;
+  if (_assistantActionMenu && _assistantActionAssistantId === item.assistant_id && _assistantActionAnchor === anchorEl) {
+    closeAssistantActionMenu();
+    return;
+  }
+  closeAssistantActionMenu();
+  const menu = document.createElement('div');
+  menu.className = 'session-action-menu open assistant-action-menu';
+  menu.appendChild(_assistantBuildAction(
+    'Rename',
+    'Edit this assistant name inline',
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>',
+    () => {
+      closeAssistantActionMenu();
+      const row = document.querySelector('.assistant-session-item[data-assistant-id="' + item.assistant_id + '"]');
+      if (row && typeof row._startRename === 'function') row._startRename();
+    }
+  ));
+  menu.appendChild(_assistantBuildAction(
+    'Delete',
+    'Remove this assistant preset',
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>',
+    async() => {
+      closeAssistantActionMenu();
+      await deleteAssistantPreset(item.assistant_id);
+    },
+    'danger'
+  ));
+  document.body.appendChild(menu);
+  _assistantActionMenu = menu;
+  _assistantActionAnchor = anchorEl;
+  _assistantActionAssistantId = item.assistant_id;
+  anchorEl.classList.add('active');
+  const row = anchorEl.closest('.assistant-session-item');
+  if (row) row.classList.add('menu-open');
+  _positionAssistantActionMenu(anchorEl);
+}
+
+async function _startAssistantInlineRename(item, row) {
+  if (!item || !row || _assistantRenamingId === item.assistant_id) return;
+  closeAssistantActionMenu();
+  _assistantRenamingId = item.assistant_id;
+  row.classList.add('menu-open');
+  const title = row.querySelector('.assistant-session-title');
+  if (!title) {
+    _assistantRenamingId = null;
+    row.classList.remove('menu-open');
+    return;
+  }
+  const oldName = item.name || 'Untitled Assistant';
+  const input = document.createElement('input');
+  input.className = 'session-title-input assistant-title-input';
+  input.value = oldName;
+  ['click', 'mousedown', 'dblclick', 'pointerdown'].forEach((type) => {
+    input.addEventListener(type, (event) => event.stopPropagation());
+  });
+  let finishDone = false;
+  const release = () => {
+    _assistantRenamingId = null;
+    row.classList.remove('menu-open');
+    if (input.isConnected) input.replaceWith(title);
+  };
+  const finish = async(save) => {
+    if (finishDone) return;
+    finishDone = true;
+    if (!save) {
+      release();
+      renderAssistantPresets();
+      return;
+    }
+    const newName = input.value.trim() || 'Untitled Assistant';
+    item.name = newName;
+    item.updated_at = new Date().toISOString();
+    try {
+      await _persistAssistantConfig();
+      renderAssistantPresets();
+    } catch (err) {
+      item.name = oldName;
+      showToast('Rename failed: ' + (err?.message || err), 4000, 'error');
+      renderAssistantPresets();
+    } finally {
+      release();
+    }
+  };
+  input.onkeydown = (event) => {
+    if (event.key === 'Enter') {
+      if (window._isImeEnter && window._isImeEnter(event)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      finish(true);
+    }
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      event.stopPropagation();
+      finish(false);
+    }
+  };
+  input.onblur = () => {
+    if (_assistantRenamingId === item.assistant_id) finish(false);
+  };
+  title.replaceWith(input);
+  setTimeout(() => {
+    input.focus();
+    input.select();
+  }, 10);
+}
+
+function renderAssistantPresets() {
+  if (_assistantActionAnchor && !_assistantActionAnchor.isConnected) closeAssistantActionMenu();
+  const list = $('assistantList');
+  const search = $('assistantSearch');
+  if (search && search.value !== _assistantFilterQuery) search.value = _assistantFilterQuery;
+  if (list) {
+    const filtered = _assistantFilteredPresets();
+    if (!filtered.length) {
+      list.innerHTML = `<div style="padding:12px;color:var(--muted);font-size:12px">${_assistantPresets.length ? 'No assistants match your search.' : 'No assistants yet.'}</div>`;
+    } else {
+      list.innerHTML = filtered.map((item) => {
+        const selected = item.assistant_id === _assistantCurrentId;
+        const meta = `${item.deliver === 'teams' ? 'teams' : 'local'} · ${_assistantFormatTimestamp(item.updated_at)}`;
+        return `
+          <div class="session-item assistant-session-item${selected ? ' active' : ''}" data-assistant-id="${esc(item.assistant_id)}" tabindex="0">
+            <div class="session-text assistant-session-text">
+              <div class="session-title-row">
+                <div class="session-title assistant-session-title">${esc(item.name || 'Untitled Assistant')}</div>
+              </div>
+              <div class="session-meta assistant-session-meta">${esc(meta)}</div>
+            </div>
+            <div class="session-actions assistant-session-actions">
+              <button type="button" class="session-actions-trigger assistant-actions-trigger" data-assistant-actions="${esc(item.assistant_id)}" aria-haspopup="menu" aria-label="Assistant actions" title="Assistant actions">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="5" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="12" cy="19" r="1.5"/></svg>
+              </button>
+            </div>
+          </div>
+        `;
+      }).join('');
+      list.querySelectorAll('.assistant-session-item').forEach((row) => {
+        const assistantId = row.dataset.assistantId;
+        const item = _assistantPresets.find((entry) => entry.assistant_id === assistantId);
+        if (!item) return;
+        row.addEventListener('click', (event) => {
+          if (event.target.closest('.assistant-session-actions')) return;
+          _assistantSetCurrent(assistantId);
+        });
+        row.addEventListener('keydown', (event) => {
+          if (event.target.closest('.assistant-session-actions')) return;
+          if (event.key === 'Enter' || event.key === ' ') {
+            event.preventDefault();
+            _assistantSetCurrent(assistantId);
+          }
+        });
+        row._startRename = () => _startAssistantInlineRename(item, row);
+      });
+      list.querySelectorAll('.assistant-actions-trigger').forEach((btn) => {
+        btn.addEventListener('click', (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          const assistantId = btn.dataset.assistantActions;
+          const item = _assistantPresets.find((entry) => entry.assistant_id === assistantId);
+          if (item) _openAssistantActionMenu(item, btn);
+        });
+      });
+    }
+  }
+  _assistantPopulateForm();
+}
+
+function filterAssistantPresets() {
+  _assistantFilterQuery = String(($('assistantSearch') || {}).value || '').trim();
+  renderAssistantPresets();
+}
+
+async function createAssistantPreset() {
+  closeAssistantActionMenu();
+  const defaults = _assistantConfigDefaults(_assistantData && _assistantData.config);
+  const preset = _assistantNormalizePreset({
+    assistant_id: _assistantGenerateId(),
+    name: 'Untitled Assistant',
+    prompt: '',
+    memory_injection: defaults.memory_injection,
+    deliver: defaults.default_deliver,
+  }, defaults);
+  _assistantPresets = [preset, ..._assistantPresets];
+  _assistantCurrentId = preset.assistant_id;
+  renderAssistantPresets();
+  try {
+    await _persistAssistantConfig();
+    renderAssistantPresets();
+    const row = document.querySelector('.assistant-session-item[data-assistant-id="' + preset.assistant_id + '"]');
+    if (row && typeof row._startRename === 'function') row._startRename();
+  } catch (err) {
+    _assistantPresets = _assistantPresets.filter((item) => item.assistant_id !== preset.assistant_id);
+    _assistantCurrentId = _assistantPresets[0] ? _assistantPresets[0].assistant_id : '';
+    renderAssistantPresets();
+    showToast('Create failed: ' + (err?.message || err), 4000, 'error');
+  }
+}
+
+async function deleteAssistantPreset(assistantId) {
+  const idx = _assistantPresets.findIndex((item) => item.assistant_id === assistantId);
+  if (idx === -1) return;
+  const nextList = _assistantPresets.filter((item) => item.assistant_id !== assistantId);
+  const nextCurrent = _assistantCurrentId === assistantId
+    ? (nextList[idx] || nextList[idx - 1] || nextList[0] || null)
+    : _assistantCurrentPreset();
+  const prevList = _assistantPresets;
+  const prevCurrent = _assistantCurrentId;
+  _assistantPresets = nextList;
+  _assistantCurrentId = nextCurrent ? nextCurrent.assistant_id : '';
+  renderAssistantPresets();
+  try {
+    await _persistAssistantConfig();
+    showToast('Assistant deleted');
+  } catch (err) {
+    _assistantPresets = prevList;
+    _assistantCurrentId = prevCurrent;
+    renderAssistantPresets();
+    showToast('Delete failed: ' + (err?.message || err), 4000, 'error');
+  }
+}
 function _renderAssistantCockpit(payload) {
   const draftEl = $('assistantCockpitDraft');
   const metaEl = $('assistantCockpitMeta');
@@ -3721,58 +3960,12 @@ function _renderAssistantCockpit(payload) {
   if (draftEl && text) draftEl.value = text;
   const parts = [];
   if (payload && payload.title) parts.push(String(payload.title));
-  if (payload && Number.isFinite(Number(payload.job_count))) parts.push(`${Number(payload.job_count)} routines`);
+  if (payload && Number.isFinite(Number(payload.job_count))) parts.push(`${Number(payload.job_count)} jobs`);
   if (payload && payload.generated_at) {
     const dt = new Date(Number(payload.generated_at) * 1000);
     if (!Number.isNaN(dt.getTime())) parts.push(dt.toLocaleString());
   }
   if (metaEl) metaEl.textContent = parts.length ? parts.join(' · ') : 'Generate a draft to start.';
-}
-
-function _assistantRoutineScheduleLabel(job) {
-  const schedule = String((job && (job.schedule_display || (job.schedule && job.schedule.expression) || job.schedule || '')) || '').trim();
-  return schedule || '—';
-}
-
-function _renderAssistantRoutines(jobs) {
-  _assistantJobs = _assistantSortedJobs(jobs || []);
-  const list = $('assistantRoutineList');
-  const meta = $('assistantRoutinesMeta');
-  if (!list) return;
-  if (meta) meta.textContent = _assistantJobs.length ? `${_assistantJobs.length} jobs` : 'No jobs';
-  if (!_assistantJobs.length) {
-    list.innerHTML = `<div style="color:var(--muted);font-size:12px;padding:4px 2px">No routines yet.</div>`;
-    return;
-  }
-  list.innerHTML = '';
-  for (const job of _assistantJobs) {
-    const item = document.createElement('div');
-    item.className = 'assistant-routine-item';
-    item.dataset.jobId = String(job.id || '');
-    const assistant = !!job.assistant_managed;
-    const badge = assistant ? '<span class="assistant-badge is-on">Assistant</span>' : '<span class="assistant-badge">Task</span>';
-    const deliver = job.deliver || 'local';
-    const schedule = _assistantRoutineScheduleLabel(job);
-    const jobIdJs = JSON.stringify(String(job.id || ''));
-    item.innerHTML = `
-      <div class="assistant-routine-item-main">
-        <div class="assistant-routine-name">${esc(job.name || '(unnamed)')}</div>
-        <div class="assistant-routine-meta">
-          <span>${esc(schedule)}</span>
-          <span>·</span>
-          <span>${esc(deliver)}</span>
-          ${badge}
-        </div>
-      </div>
-      <div class="assistant-routine-actions">
-        <button type="button" class="panel-head-btn has-tooltip" data-tooltip="Run once" aria-label="Run once" onclick="event.stopPropagation(); runAssistantRoutine(${jobIdJs})"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polygon points="5 3 19 12 5 21 5 3"/></svg></button>
-        <button type="button" class="panel-head-btn has-tooltip" data-tooltip="${assistant ? 'Unlink' : 'Link'}" aria-label="${assistant ? 'Unlink' : 'Link'}" onclick="event.stopPropagation(); toggleAssistantRoutine(${jobIdJs}, ${assistant ? 'false' : 'true'})"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 13a5 5 0 0 1 7 0l1 1a5 5 0 0 1-7 7l-1-1"/><path d="M14 11a5 5 0 0 0-7 0l-1 1a5 5 0 0 0 7 7l1-1"/></svg></button>
-        <button type="button" class="panel-head-btn has-tooltip" data-tooltip="Copy" aria-label="Copy" onclick="event.stopPropagation(); copyAssistantRoutine(${jobIdJs})"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button>
-      </div>`;
-    item.onclick = () => _assistantSetFormFromJob(job);
-    if (String(job.id) === String(_assistantSelectedJobId)) item.classList.add('active');
-    list.appendChild(item);
-  }
 }
 
 async function loadAssistant(force) {
@@ -3782,9 +3975,8 @@ async function loadAssistant(force) {
     refreshBtn.disabled = true;
   }
   try {
-    const [memory, crons, cfg, gateway] = await Promise.all([
+    const [memory, cfg, gateway] = await Promise.all([
       api('/api/memory'),
-      api('/api/crons'),
       api('/api/profile/config'),
       api('/api/gateway/status').catch(() => null),
     ]);
@@ -3794,21 +3986,19 @@ async function loadAssistant(force) {
       gateway: gateway || null,
       cockpit: (_assistantData && _assistantData.cockpit) || null,
     };
-    const cfgDefaults = _assistantScheduleDefaults(cfg || {});
+    const cfgDefaults = _assistantConfigDefaults(cfg || {});
     const cfgMem = $('assistantConfigMemoryInjection');
     if (cfgMem) cfgMem.checked = cfgDefaults.memory_injection;
     const cfgTeams = $('assistantConfigDefaultTeams');
     if (cfgTeams) cfgTeams.checked = cfgDefaults.default_deliver === 'teams';
+    _assistantPresets = cfgDefaults.assistants.map((item) => _assistantNormalizePreset(item, cfgDefaults));
+    if (!_assistantCurrentId || !_assistantPresets.find((item) => item.assistant_id === _assistantCurrentId)) {
+      _assistantCurrentId = _assistantPresets[0] ? _assistantPresets[0].assistant_id : '';
+    }
     _renderAssistantMemory(memory || {});
     _renderAssistantTeamsStatus(gateway || null);
     _renderAssistantCockpit(_assistantData.cockpit || {});
-    _renderAssistantRoutines((crons && crons.jobs) || []);
-    if (!_assistantSelectedJobId || !_assistantJobs.find(j => String(j.id) === String(_assistantSelectedJobId))) {
-      const first = _assistantJobs.find(j => j.assistant_managed) || _assistantJobs[0] || null;
-      _assistantSetFormFromJob(first);
-    } else {
-      _assistantSetFormFromJob(_assistantJobs.find(j => String(j.id) === String(_assistantSelectedJobId)) || null);
-    }
+    renderAssistantPresets();
     const memBox = $('assistantMemoryMd');
     if (memBox) memBox.disabled = false;
     const userBox = $('assistantUserMd');
@@ -3817,7 +4007,7 @@ async function loadAssistant(force) {
     const hasDraft = draftBox && String(draftBox.value || '').trim();
     if (!hasDraft || force) await generateAssistantCockpit(_assistantCockpitKind || 'today', {silent: true});
   } catch(e) {
-    const list = $('assistantRoutineList');
+    const list = $('assistantList');
     if (list) list.innerHTML = `<div style="color:var(--error);font-size:12px;padding:4px 2px">Failed to load assistant view: ${esc(e.message || String(e))}</div>`;
   } finally {
     if (force && refreshBtn) {
@@ -3862,7 +4052,7 @@ function applyAssistantDraftToTeams() {
 async function saveAssistantMemory() {
   const memoryEl = $('assistantMemoryMd');
   const userEl = $('assistantUserMd');
-  const err = $('assistantRoutineError');
+  const err = $('assistantPresetError');
   if (!memoryEl || !userEl) return;
   if (err) err.style.display = 'none';
   try {
@@ -3881,90 +4071,33 @@ async function saveAssistantMemory() {
 }
 
 async function saveAssistantConfig() {
-  const err = $('assistantRoutineError');
-  const assistant = {
-    memory_injection: !!(($('assistantConfigMemoryInjection') || {}).checked),
-    default_deliver: (($('assistantConfigDefaultTeams') || {}).checked) ? 'teams' : 'local',
-  };
+  const err = $('assistantPresetError');
   try {
     if (err) err.style.display = 'none';
-    const saved = await api('/api/profile/config', {method:'POST', body: JSON.stringify({assistant})});
-    _assistantData = _assistantData || {};
-    _assistantData.config = saved || {assistant};
+    await _persistAssistantConfig();
     showToast('Assistant defaults saved');
-    await loadAssistant(true);
   } catch(e) {
     if (err) { err.textContent = t('error_prefix') + e.message; err.style.display = ''; }
     else showToast('Save failed: ' + e.message, 4000);
   }
 }
 
-function _assistantRoutinePayload() {
-  const name = String(($('assistantRoutineName') || {}).value || '').trim();
-  const prompt = String(($('assistantRoutinePrompt') || {}).value || '').trim();
-  const deliverTeams = !!(($('assistantDeliverTeams') || {}).checked);
-  const memoryInjection = !!(($('assistantMemoryInjection') || {}).checked);
-  const schedule = _assistantScheduleExpressionFromForm();
-  return {
-    id: String(($('assistantRoutineId') || {}).value || '').trim(),
-    name,
-    prompt,
-    schedule,
-    deliver: deliverTeams ? 'teams' : 'local',
-    assistant_managed: true,
-    assistant_memory_injection: memoryInjection,
-  };
-}
-
-async function saveAssistantRoutine() {
-  const err = $('assistantRoutineError');
-  const payload = _assistantRoutinePayload();
-  if (!payload.schedule) {
-    if (err) { err.textContent = 'Schedule is required'; err.style.display = ''; }
-    return;
-  }
-  if (!payload.prompt) {
-    if (err) { err.textContent = 'Prompt is required'; err.style.display = ''; }
-    return;
-  }
+async function saveCurrentAssistantPreset() {
+  const err = $('assistantPresetError');
+  const current = _assistantCurrentPreset();
+  if (!current) return;
+  current.name = String(($('assistantPresetName') || {}).value || '').trim() || 'Untitled Assistant';
+  current.prompt = String(($('assistantPresetPrompt') || {}).value || '');
+  current.memory_injection = !!(($('assistantPresetMemoryInjection') || {}).checked);
+  current.deliver = (($('assistantPresetDeliverTeams') || {}).checked) ? 'teams' : 'local';
+  current.updated_at = new Date().toISOString();
   try {
     if (err) err.style.display = 'none';
-    if (payload.id) {
-      await api('/api/crons/update', {method:'POST', body: JSON.stringify({job_id: payload.id, name: payload.name, prompt: payload.prompt, schedule: payload.schedule, deliver: payload.deliver, assistant_managed: true, assistant_memory_injection: payload.assistant_memory_injection})});
-    } else {
-      const res = await api('/api/crons/create', {method:'POST', body: JSON.stringify({name: payload.name, prompt: payload.prompt, schedule: payload.schedule, deliver: payload.deliver, assistant_managed: true, assistant_memory_injection: payload.assistant_memory_injection})});
-      if (res && (res.job || res.id)) {
-        _assistantSelectedJobId = String((res.job && res.job.id) || res.id || '');
-      }
-    }
-    showToast('Routine saved');
-    await loadAssistant(true);
+    await _persistAssistantConfig();
+    renderAssistantPresets();
+    showToast('Assistant saved');
   } catch(e) {
     if (err) { err.textContent = t('error_prefix') + e.message; err.style.display = ''; }
-  }
-}
-
-async function runAssistantRoutine(jobId) {
-  if (!jobId) return;
-  try {
-    await api('/api/crons/run', {method:'POST', body: JSON.stringify({job_id: jobId})});
-    showToast('Routine started');
-  } catch(e) {
-    showToast('Run failed: ' + e.message, 4000);
-  }
-}
-
-async function runSelectedAssistantRoutine() {
-  if (_assistantSelectedJobId) return runAssistantRoutine(_assistantSelectedJobId);
-}
-
-async function toggleAssistantRoutine(jobId, enabled) {
-  if (!jobId) return;
-  try {
-    await api('/api/crons/update', {method:'POST', body: JSON.stringify({job_id: jobId, assistant_managed: !!enabled})});
-    await loadAssistant(true);
-  } catch(e) {
-    showToast('Update failed: ' + e.message, 4000);
   }
 }
 
@@ -3986,6 +4119,21 @@ async function sendAssistantTeamsMessage(kind) {
     showToast('Teams send failed: ' + e.message, 4000);
   }
 }
+
+document.addEventListener('click', (event) => {
+  if (!_assistantActionMenu) return;
+  if (_assistantActionMenu.contains(event.target)) return;
+  if (_assistantActionAnchor && _assistantActionAnchor.contains(event.target)) return;
+  closeAssistantActionMenu();
+}, true);
+
+document.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape' && _assistantActionMenu) closeAssistantActionMenu();
+});
+
+window.addEventListener('resize', () => {
+  if (_assistantActionMenu && _assistantActionAnchor) _positionAssistantActionMenu(_assistantActionAnchor);
+});
 
 // ── Workspace management ──
 let _workspaceList = [];  // cached from /api/workspaces
