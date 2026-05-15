@@ -28,6 +28,7 @@ preview is instant — the UI updates as you click through options.
 | **Monokai** | Warm dark theme inspired by the Monokai editor scheme. Green/pink accents. |
 | **Nord** | Arctic blue-gray palette from the Nord color system. Calm and minimal. |
 | **OLED** | True black (#000) backgrounds for OLED displays. Minimizes glow and burn-in risk. |
+| **Evergreen** | Deep green visual style (available as `Skin: Evergreen`, or `/theme evergreen` alias). |
 | **Custom themes** | Any string accepted by `settings.json`, `POST /api/settings`, and `/theme` if added to the picker/command list. Pure CSS variables only. |
 
 ---
@@ -70,12 +71,51 @@ Every color in the UI comes from these CSS variables:
   --code-text: #f0c27f;    /* Inline code text color */
   --code-inline-bg: rgba(0,0,0,.35); /* Inline code background */
   --pre-text: #e2e8f0;     /* Code block text color */
+
+  /* Button system (required for consistent controls across panels) */
+  --btn-secondary-bg: var(--surface);
+  --btn-secondary-border: var(--border);
+  --btn-secondary-text: var(--text);
+  --btn-secondary-hover-bg: var(--accent-bg);
+  --btn-secondary-hover-border: var(--accent-bg-strong);
+  --btn-secondary-hover-text: var(--accent-text);
+  --btn-primary-bg: var(--accent);
+  --btn-primary-border: var(--accent);
+  --btn-primary-text: #fff;
+  --btn-primary-hover-bg: var(--accent-hover);
+  --btn-primary-hover-border: var(--accent-hover);
+  --btn-primary-hover-text: #fff;
+  --btn-danger-bg: rgba(220,38,38,.08);
+  --btn-danger-border: rgba(220,38,38,.35);
+  --btn-danger-text: #dc2626;
+  --btn-danger-hover-bg: rgba(220,38,38,.14);
+  --btn-danger-hover-border: #dc2626;
+  --btn-danger-hover-text: #dc2626;
+  --btn-icon-bg: transparent;
+  --btn-icon-border: transparent;
+  --btn-icon-text: var(--muted);
+  --btn-icon-hover-bg: var(--accent-bg);
+  --btn-icon-hover-border: var(--accent-bg-strong);
+  --btn-icon-hover-text: var(--accent-text);
 }
 ```
 
 The **core palette** controls the overall mood. The **surface/chrome** and
 **typography** variables are part of the standard theme contract — define all
 of them for a complete theme.
+
+### Button style contract
+
+Hermes Web UI now treats buttons as one system across panels:
+
+- `.btn` / `.sm-btn` use secondary token set (`--btn-secondary-*`)
+- `.btn.primary` and `.panel-head-btn.primary` use primary token set (`--btn-primary-*`)
+- `.btn.danger` uses danger token set (`--btn-danger-*`)
+- Icon-only controls (`.panel-head-btn`) use icon token set (`--btn-icon-*`)
+
+If you add a new theme/skin, override these button tokens together with accent
+tokens so behavior and contrast stay consistent in Settings, Assistant, Kanban,
+Logs, and modal actions.
 
 For **light themes**, you also need `:root[data-theme="name"]` overrides
 for elements that use `rgba(255,255,255,.XX)` hover/border effects (these

@@ -5,6 +5,7 @@ Extracted from server.py (Sprint 11) so server.py is a thin shell.
 
 import html as _html
 import copy
+import hashlib
 import json
 import logging
 import os
@@ -3529,6 +3530,17 @@ def handle_get(handler, parsed) -> bool:
             versions = _list_workflow_versions(workflow_id, limit=50)
             return j(handler, {"success": True, "data": versions})
 
+        if suffix == "/source":
+            from api.workflow_markdown import read_workflow_source as _read_workflow_source
+            from api.workspace import get_last_workspace as _get_last_workspace
+
+            workspace_path = parse_qs(parsed.query).get("workspace_path", [None])[0] or _get_last_workspace()
+            try:
+                source = _read_workflow_source(workspace_path, workflow_id)
+                return j(handler, {"success": True, "data": source})
+            except ValueError as exc:
+                return bad(handler, str(exc), 400)
+
         return j(handler, {"success": True, "data": definition})
 
     # ── Workflow Trace API (GET) ──
@@ -3962,6 +3974,15 @@ def handle_get(handler, parsed) -> bool:
                 "threshold_tokens": getattr(s, "threshold_tokens", 0) or 0,
                 "last_prompt_tokens": getattr(s, "last_prompt_tokens", 0) or 0,
             }
+            latest_todos = _latest_todo_state_from_messages(_all_msgs)
+            if latest_todos:
+                todo_fingerprint, todo_items = latest_todos
+                raw["todos"] = _apply_todo_overrides(
+                    todo_items,
+                    getattr(s, "todo_overrides", {}),
+                    todo_fingerprint,
+                )
+                raw["todo_source_fingerprint"] = todo_fingerprint
             if cli_meta and _is_messaging_session_record(cli_meta):
                 raw = _merge_cli_sidebar_metadata(raw, cli_meta)
             # Signal to the frontend that older messages were omitted.
@@ -4744,6 +4765,39 @@ def handle_post(handler, parsed) -> bool:
             return j(handler, {"success": True, "data": artifact})
 
     # ── Workflow Definitions API POST handlers ──
+    if parsed.path == "/api/workflow/definitions/source":
+        from api.workflow_markdown import (
+            create_markdown_workflow as _create_markdown_workflow,
+            import_markdown_workflow as _import_markdown_workflow,
+        )
+        from api.workspace import get_last_workspace as _get_last_workspace
+
+        current_user = _current_user(handler)
+        actor = current_user.get("username", "unknown") if current_user else "unknown"
+        workspace_path = body.get("workspace_path") or _get_last_workspace()
+        source_path = str(body.get("source_path") or "").strip()
+        action = str(body.get("action") or "create").strip()
+        try:
+            if action == "import":
+                definition = _import_markdown_workflow(
+                    workspace_path,
+                    source_path,
+                    actor=actor,
+                    project_id=body.get("project_id"),
+                )
+            else:
+                definition = _create_markdown_workflow(
+                    workspace_path,
+                    source_path,
+                    str(body.get("name") or "Untitled Workflow"),
+                    actor=actor,
+                    project_id=body.get("project_id"),
+                    template=str(body.get("template") or "blank"),
+                )
+            return j(handler, {"success": True, "data": definition}, status=201)
+        except ValueError as exc:
+            return bad(handler, str(exc), 400)
+
     if parsed.path == "/api/workflow/definitions":
         from api.workflow_trace import create_workflow_definition as _create_workflow_def
         current_user = _current_user(handler)
@@ -6519,6 +6573,64 @@ def handle_post(handler, parsed) -> bool:
     return False  # 404
 
 
+_TODO_ALLOWED_STATUSES = {"pending", "in_progress", "completed", "cancelled"}
+
+
+def _latest_todo_state_from_messages(messages):
+    if not isinstance(messages, list):
+        return None
+    for msg in reversed(messages):
+        if not isinstance(msg, dict) or msg.get("role") != "tool":
+            continue
+        try:
+            content = msg.get("content")
+            payload = json.loads(content) if isinstance(content, str) else content
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if not isinstance(payload, dict) or not isinstance(payload.get("todos"), list):
+            continue
+        todos = [item for item in payload["todos"] if isinstance(item, dict)]
+        if not todos:
+            continue
+        return _todo_source_fingerprint(todos), todos
+    return None
+
+
+def _todo_source_fingerprint(todos):
+    source = [
+        {
+            "id": str(item.get("id") or ""),
+            "content": str(item.get("content") or ""),
+        }
+        for item in todos
+        if isinstance(item, dict)
+    ]
+    raw = json.dumps(source, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _apply_todo_overrides(todos, overrides, fingerprint=None):
+    if not isinstance(todos, list):
+        return []
+    if fingerprint is None:
+        fingerprint = _todo_source_fingerprint(todos)
+    if not isinstance(overrides, dict) or overrides.get("source_fingerprint") != fingerprint:
+        return [dict(item) for item in todos if isinstance(item, dict)]
+    items = overrides.get("items") if isinstance(overrides.get("items"), dict) else {}
+    effective = []
+    for item in todos:
+        if not isinstance(item, dict):
+            continue
+        next_item = dict(item)
+        todo_id = str(next_item.get("id") or "")
+        patch = items.get(todo_id)
+        if isinstance(patch, dict) and patch.get("status") in _TODO_ALLOWED_STATUSES:
+            next_item["status"] = patch["status"]
+            next_item["status_updated_at"] = patch.get("updated_at")
+        effective.append(next_item)
+    return effective
+
+
 def handle_patch(handler, parsed) -> bool:
     """Handle all PATCH routes. Returns True if handled, False for 404."""
     if not _check_csrf(handler):
@@ -6531,6 +6643,50 @@ def handle_patch(handler, parsed) -> bool:
         if result is False:
             return _kanban_unknown_endpoint(handler, parsed, "PATCH")
         return True
+
+    if parsed.path == "/api/session/todos":
+        scope_err = _require_scope(handler, "chat")
+        if scope_err:
+            return scope_err
+        try:
+            require(body, "session_id", "todo_id", "status")
+        except ValueError as e:
+            return bad(handler, str(e))
+        sid = str(body.get("session_id") or "")
+        todo_id = str(body.get("todo_id") or "")
+        status = str(body.get("status") or "").strip().lower()
+        if status not in _TODO_ALLOWED_STATUSES:
+            return bad(handler, "Invalid todo status", 400)
+        try:
+            s = get_session(sid)
+        except KeyError:
+            return bad(handler, "Session not found", 404)
+        cli_meta = _lookup_cli_session_metadata(sid)
+        if cli_meta.get("read_only"):
+            return bad(handler, "Read-only imported sessions cannot be modified", 400)
+        latest = _latest_todo_state_from_messages(getattr(s, "messages", []) or [])
+        if not latest:
+            return bad(handler, "No active task list in this session", 404)
+        fingerprint, base_todos = latest
+        if not any(str(item.get("id") or "") == todo_id for item in base_todos if isinstance(item, dict)):
+            return bad(handler, "Todo not found", 404)
+        with _get_session_agent_lock(sid):
+            s = get_session(sid)
+            latest = _latest_todo_state_from_messages(getattr(s, "messages", []) or [])
+            if not latest:
+                return bad(handler, "No active task list in this session", 404)
+            fingerprint, base_todos = latest
+            if not any(str(item.get("id") or "") == todo_id for item in base_todos if isinstance(item, dict)):
+                return bad(handler, "Todo not found", 404)
+            overrides = getattr(s, "todo_overrides", None)
+            if not isinstance(overrides, dict) or overrides.get("source_fingerprint") != fingerprint:
+                overrides = {"source_fingerprint": fingerprint, "items": {}}
+            items = overrides.setdefault("items", {})
+            items[todo_id] = {"status": status, "updated_at": time.time()}
+            s.todo_overrides = overrides
+            s.save()
+            todos = _apply_todo_overrides(base_todos, s.todo_overrides, fingerprint)
+        return j(handler, {"ok": True, "todos": todos, "todo_overrides": s.todo_overrides})
 
     # ── Workflow API ──
     # /api/workflow/tasks/{task_id}/calls/{call_id}
@@ -6564,6 +6720,30 @@ def handle_patch(handler, parsed) -> bool:
             return bad(handler, str(e), 400)
 
     # ── Workflow Definitions PATCH ──
+    _trace_def_source_patch = re.match(r"^/api/workflow/definitions/([^/]+)/source$", parsed.path or "")
+    if _trace_def_source_patch:
+        workflow_id = _trace_def_source_patch.group(1)
+        from api.workflow_markdown import save_workflow_source as _save_workflow_source
+        from api.workflow_trace import can_write_definition as _can_write_workflow_def
+        from api.workspace import get_last_workspace as _get_last_workspace
+
+        current_user = _current_user(handler)
+        if not _can_write_workflow_def(workflow_id, current_user):
+            return bad(handler, "Access denied", 403)
+        workspace_path = body.get("workspace_path") or _get_last_workspace()
+        try:
+            saved = _save_workflow_source(
+                workspace_path,
+                workflow_id,
+                str(body.get("source") or ""),
+                expected_checksum=body.get("checksum") or body.get("expected_checksum"),
+                source_path=body.get("source_path"),
+            )
+            return j(handler, {"success": True, "data": saved})
+        except ValueError as exc:
+            status = 409 if "conflict" in str(exc).lower() else 400
+            return bad(handler, str(exc), status)
+
     _trace_def_patch = re.match(r"^/api/workflow/definitions/([^/]+)$", parsed.path or "")
     if _trace_def_patch:
         workflow_id = _trace_def_patch.group(1)

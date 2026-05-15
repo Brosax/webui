@@ -934,18 +934,7 @@ def _write_endpoint_to_config(profile_dir: Path, base_url: str = None, api_key: 
     if not base_url and not api_key:
         return
     config_path = profile_dir / 'config.yaml'
-    try:
-        import yaml as _yaml
-    except ImportError:
-        return
-    cfg = {}
-    if config_path.exists():
-        try:
-            loaded = _yaml.safe_load(config_path.read_text(encoding="utf-8"))
-            if isinstance(loaded, dict):
-                cfg = loaded
-        except Exception:
-            logger.debug("Failed to load config from %s", config_path)
+    cfg = _load_profile_config(profile_dir)
     model_section = cfg.get('model', {})
     if not isinstance(model_section, dict):
         model_section = {}
@@ -954,7 +943,223 @@ def _write_endpoint_to_config(profile_dir: Path, base_url: str = None, api_key: 
     if api_key:
         model_section['api_key'] = api_key
     cfg['model'] = model_section
-    config_path.write_text(_yaml.dump(cfg, default_flow_style=False, allow_unicode=True), encoding='utf-8')
+    try:
+        import yaml as _yaml
+    except ImportError:
+        config_text = _simple_yaml_dump(cfg)
+    else:
+        config_text = _yaml.safe_dump(cfg, sort_keys=False, allow_unicode=True)
+    config_path.write_text(
+        config_text + ("\n" if config_text and not config_text.endswith("\n") else ""),
+        encoding='utf-8',
+    )
+
+
+def _load_profile_config(profile_dir: Path) -> dict:
+    """Return the parsed config.yaml for *profile_dir* or an empty dict."""
+    config_path = profile_dir / "config.yaml"
+    try:
+        import yaml as _yaml
+    except ImportError:
+        if not config_path.exists():
+            return {}
+        try:
+            loaded = _simple_yaml_load(config_path.read_text(encoding="utf-8"))
+        except Exception:
+            logger.debug("Failed to load config from %s", config_path)
+            return {}
+        return loaded if isinstance(loaded, dict) else {}
+    if not config_path.exists():
+        return {}
+    try:
+        loaded = _yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    except Exception:
+        logger.debug("Failed to load config from %s", config_path)
+        return {}
+    return loaded if isinstance(loaded, dict) else {}
+
+
+def _deep_merge_dict(base: dict, updates: dict) -> dict:
+    """Recursively merge mapping *updates* into *base* and return *base*."""
+    for key, value in (updates or {}).items():
+        if (
+            isinstance(value, dict)
+            and isinstance(base.get(key), dict)
+        ):
+            _deep_merge_dict(base[key], value)
+        else:
+            base[key] = value
+    return base
+
+
+def _simple_yaml_scalar(value):
+    """Serialize a scalar to a YAML-compatible token."""
+    if value is True:
+        return "true"
+    if value is False:
+        return "false"
+    if value is None:
+        return "null"
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return str(value)
+    return json.dumps(str(value), ensure_ascii=False)
+
+
+def _simple_yaml_dump(value, indent: int = 0) -> str:
+    """Best-effort YAML emitter for the limited config shapes we write here."""
+    pad = " " * indent
+    if isinstance(value, dict):
+        lines: list[str] = []
+        for key, item in value.items():
+            key_text = str(key)
+            if isinstance(item, dict):
+                lines.append(f"{pad}{key_text}:")
+                lines.append(_simple_yaml_dump(item, indent + 2))
+            elif isinstance(item, list):
+                if not item:
+                    lines.append(f"{pad}{key_text}: []")
+                else:
+                    lines.append(f"{pad}{key_text}:")
+                    for entry in item:
+                        if isinstance(entry, dict):
+                            lines.append(f"{pad}  -")
+                            lines.append(_simple_yaml_dump(entry, indent + 4))
+                        else:
+                            lines.append(f"{pad}  - {_simple_yaml_scalar(entry)}")
+            else:
+                lines.append(f"{pad}{key_text}: {_simple_yaml_scalar(item)}")
+        return "\n".join(lines)
+    if isinstance(value, list):
+        lines = []
+        for entry in value:
+            if isinstance(entry, dict):
+                lines.append(f"{pad}-")
+                lines.append(_simple_yaml_dump(entry, indent + 2))
+            else:
+                lines.append(f"{pad}- {_simple_yaml_scalar(entry)}")
+        return "\n".join(lines)
+    return f"{pad}{_simple_yaml_scalar(value)}"
+
+
+def _simple_yaml_scalar_from_text(text: str):
+    """Parse a scalar emitted by _simple_yaml_scalar()."""
+    token = text.strip()
+    if not token:
+        return ""
+    lowered = token.lower()
+    if lowered == "true":
+        return True
+    if lowered == "false":
+        return False
+    if lowered == "null" or lowered == "~":
+        return None
+    if token[:1] in {'"', "'"}:
+        try:
+            return json.loads(token)
+        except Exception:
+            return token.strip('"\'')
+    try:
+        if "." in token:
+            return float(token)
+        return int(token)
+    except Exception:
+        return token
+
+
+def _simple_yaml_load(text: str):
+    """Parse the subset of YAML emitted by _simple_yaml_dump()."""
+    raw_lines = [line.rstrip("\n") for line in text.splitlines()]
+
+    def _skip_blank(idx: int) -> int:
+        while idx < len(raw_lines):
+            stripped = raw_lines[idx].strip()
+            if stripped and not stripped.startswith("#"):
+                break
+            idx += 1
+        return idx
+
+    def _parse_block(idx: int, indent: int):
+        idx = _skip_blank(idx)
+        mapping: dict = {}
+        items: list = []
+        mode = None
+        while idx < len(raw_lines):
+            line = raw_lines[idx]
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                idx += 1
+                continue
+            cur_indent = len(line) - len(line.lstrip(" "))
+            if cur_indent < indent:
+                break
+            if cur_indent > indent:
+                break
+            if stripped.startswith("- "):
+                if mode == "dict":
+                    break
+                mode = "list"
+                items.append(_simple_yaml_scalar_from_text(stripped[2:]))
+                idx += 1
+                continue
+            if stripped == "-":
+                if mode == "dict":
+                    break
+                mode = "list"
+                child, idx = _parse_block(idx + 1, indent + 2)
+                items.append(child)
+                continue
+            key, sep, rest = stripped.partition(":")
+            if not sep:
+                idx += 1
+                continue
+            if mode == "list":
+                break
+            mode = "dict"
+            key = key.strip()
+            rest = rest.strip()
+            idx += 1
+            if rest:
+                mapping[key] = _simple_yaml_scalar_from_text(rest)
+                continue
+            child, idx = _parse_block(idx, indent + 2)
+            mapping[key] = child
+        if mode == "list":
+            return items, idx
+        return mapping, idx
+
+    parsed, _ = _parse_block(0, 0)
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def read_profile_config(home: Path | None = None) -> dict:
+    """Read the active profile config, or an explicit profile *home*."""
+    profile_home = Path(home).expanduser() if home is not None else get_active_hermes_home()
+    return _load_profile_config(profile_home)
+
+
+def write_profile_config(home: Path | None = None, updates: dict | None = None) -> dict:
+    """Merge *updates* into a profile's config.yaml and return the saved config."""
+    profile_home = Path(home).expanduser() if home is not None else get_active_hermes_home()
+    config_path = profile_home / "config.yaml"
+    cfg = _load_profile_config(profile_home)
+    _deep_merge_dict(cfg, updates or {})
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        import yaml as _yaml
+    except ImportError:
+        config_text = _simple_yaml_dump(cfg)
+    else:
+        config_text = _yaml.safe_dump(cfg, sort_keys=False, allow_unicode=True)
+    config_path.write_text(config_text + ("\n" if config_text and not config_text.endswith("\n") else ""), encoding="utf-8")
+    try:
+        reload_config = None
+        from api.config import reload_config as _reload_config
+
+        reload_config = _reload_config
+        reload_config()
+    except Exception:
+        logger.debug("Failed to reload config after writing %s", config_path)
+    return cfg
 
 
 def create_profile_api(name: str, clone_from: str = None,

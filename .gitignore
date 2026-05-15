@@ -42,6 +42,8 @@ docs/*
 !docs/ui-ux/**
 !docs/rfcs/
 !docs/rfcs/**
+!docs/plans/
+!docs/plans/**
 !docs/docker.md
 !docs/supervisor.md
 !docs/troubleshooting.md

@@ -188,29 +188,9 @@
           <button class="panel-head-btn has-tooltip has-tooltip--bottom" id="workflowRefreshBtn" onclick="loadWorkflowTasks()" data-tooltip="Refresh" aria-label="Refresh"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg></button>
           <button class="panel-head-btn has-tooltip has-tooltip--bottom" id="workflowCollapseBtn" onclick="toggleTraceTimeline()" data-tooltip="Collapse/Expand" aria-label="Collapse/Expand" style="display:none"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg></button>
           <button class="panel-head-btn has-tooltip has-tooltip--bottom" onclick="openWorkflowCreate()" data-tooltip="New workflow" data-i18n-title="workflow_new_definition" aria-label="New workflow"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>
-          <button class="panel-head-btn has-tooltip has-tooltip--bottom" onclick="switchWorkflowView('canvas')" data-tooltip="Canvas editor" data-i18n-title="workflow_canvas" aria-label="Canvas"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="16 3 21 3 21 8"/><line x1="4" y1="20" x2="21" y2="3"/><polyline points="21 16 21 21 16 21"/><line x1="15" y1="15" x2="21" y2="21"/><line x1="4" y1="4" x2="9" y2="9"/></svg></button>
         </div>
       </div>
       <div class="workflow-list" id="workflowList"><div style="padding:12px;color:var(--muted);font-size:12px" data-i18n="loading">Loading...</div></div>
-      <div id="workflow-canvas-panel" style="display:none;flex-direction:column;flex:1;min-height:0">
-        <div class="canvas-toolbar">
-          <button class="btn btn-sm" onclick="addCanvasNode('file_input')">📁 Input</button>
-          <button class="btn btn-sm" onclick="addCanvasNode('agent')">🤖 Agent</button>
-          <button class="btn btn-sm" onclick="addCanvasNode('prompt')">💬 Prompt</button>
-          <button class="btn btn-sm" onclick="addCanvasNode('file_output')">💾 Output</button>
-          <span class="toolbar-sep"></span>
-          <button class="btn btn-sm btn-accent" onclick="saveCanvasWorkflow()">Save</button>
-          <button class="btn btn-sm" onclick="runCanvasWorkflow()">Run</button>
-        </div>
-        <div class="canvas-split">
-          <div class="canvas-area">
-            <svg id="workflow-canvas-svg" class="workflow-canvas-svg"><defs><marker id="arrow" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto"><path d="M0,0 L0,6 L9,3 z" fill="var(--accent)"/></marker></defs></svg>
-          </div>
-          <div class="canvas-config-panel" id="canvasConfigPanel">
-            <div class="canvas-config-empty">Select a node to configure</div>
-          </div>
-        </div>
-      </div>
     </div>
     <!-- Todo panel -->
     <div class="panel-view" id="panelTodos">
@@ -1540,8 +1520,10 @@
 <script src="static/commands.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/messages.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/panels.js?v=__WEBUI_VERSION__" defer></script>
-<script src="static/workflow.js?v=__WEBUI_VERSION__" defer></script>
+<script src="static/workflow-registry.js?v=__WEBUI_VERSION__" defer></script>
+<script src="static/workflow-editor.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/workflow-canvas.js?v=__WEBUI_VERSION__" defer></script>
+<script src="static/workflow.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/onboarding.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/boot.js?v=__WEBUI_VERSION__" defer></script>
 

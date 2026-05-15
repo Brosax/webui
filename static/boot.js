@@ -1167,7 +1167,9 @@ const _SKINS=[
   {name:'Poseidon', colors:['#0EA5E9','#0284C7','#0369A1']},
   {name:'Sisyphus', colors:['#A78BFA','#8B5CF6','#7C3AED']},
   {name:'Charizard',colors:['#FB923C','#F97316','#EA580C']},
+  {name:'Evergreen',colors:['#3FAE6C','#2D8852','#1F6A3D']},
   {name:'Sienna',   colors:['#D97757','#C06A49','#9A523A']},
+  {name:'NodeFlow', colors:['#2f80ed','#3fb950','#f85149']},
 ];
 const _VALID_THEMES=new Set((_THEMES||[]).map(t=>t.value));
 const _VALID_SKINS=new Set((_SKINS||[]).map(s=>s.name.toLowerCase()));
@@ -1177,6 +1179,7 @@ const _LEGACY_THEME_MAP={
   monokai:{theme:'dark',skin:'sisyphus'},
   nord:{theme:'dark',skin:'slate'},
   oled:{theme:'dark',skin:'default'},
+  evergreen:{theme:'dark',skin:'evergreen'},
 };
 let _systemThemeMq=null;
 let _onSystemThemeChange=null;

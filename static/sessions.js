@@ -1099,6 +1099,12 @@ async function _ensureMessagesLoaded(sid) {
   S.messages = msgs;
   if(S.session&&S.session.session_id===sid){
     S.session.message_count=Number(data.session.message_count || msgs.length);
+    if(Array.isArray(data.session.todos)){
+      S.session.todos=data.session.todos;
+      S.session._todo_message_count=msgs.length;
+    }
+    if(data.session.todo_overrides) S.session.todo_overrides=data.session.todo_overrides;
+    if(data.session.todo_source_fingerprint) S.session.todo_source_fingerprint=data.session.todo_source_fingerprint;
     S.lastUsage={...(data.session.last_usage||S.lastUsage||{})};
     _setSessionViewedCount(sid, Number(S.session.message_count || msgs.length));
   }

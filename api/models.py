@@ -341,6 +341,7 @@ class Session:
                 worktree_created_at=None,
                 enabled_toolsets=None,
                 composer_draft=None,
+                todo_overrides=None,
                 **kwargs):
         self.session_id = session_id or uuid.uuid4().hex[:12]
         self.title = title
@@ -385,6 +386,7 @@ class Session:
         self.source_label = kwargs.get('source_label')
         self.enabled_toolsets = enabled_toolsets  # List[str] or None — per-session toolset override
         self.composer_draft = composer_draft if isinstance(composer_draft, dict) else {}
+        self.todo_overrides = todo_overrides if isinstance(todo_overrides, dict) else {}
         self._metadata_message_count = None
 
     @property
@@ -427,7 +429,7 @@ class Session:
             'parent_session_id',
             'worktree_path', 'worktree_branch', 'worktree_repo_root', 'worktree_created_at',
             'is_cli_session', 'source_tag', 'raw_source', 'session_source', 'source_label',
-            'enabled_toolsets', 'composer_draft',
+            'enabled_toolsets', 'composer_draft', 'todo_overrides',
         ]
         meta = {k: getattr(self, k, None) for k in METADATA_FIELDS}
         meta['messages'] = self.messages
@@ -612,6 +614,7 @@ class Session:
             'source_label': self.source_label,
             'enabled_toolsets': self.enabled_toolsets,
             'composer_draft': self.composer_draft if isinstance(self.composer_draft, dict) else {},
+            'todo_overrides': self.todo_overrides if isinstance(self.todo_overrides, dict) else {},
             'is_streaming': _is_streaming_session(
                 self.active_stream_id, active_stream_ids
             ) if include_runtime else False,

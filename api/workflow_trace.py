@@ -1451,6 +1451,13 @@ def _step_key(step: dict, index: int) -> str:
     return f"step_{index + 1}"
 
 
+def _step_config(step: dict) -> dict:
+    config = step.get("parameters") if isinstance(step.get("parameters"), dict) else None
+    if config is None:
+        config = step.get("config") if isinstance(step.get("config"), dict) else {}
+    return dict(config or {})
+
+
 def _merge_run_metadata(run: dict, patch: dict) -> dict:
     meta = dict(run.get("metadata") or {})
     meta.update(patch)
@@ -1501,8 +1508,59 @@ def _run_step(
         },
     )
 
-    if step_type == "agent_instruction":
+    if bool(step.get("disabled")):
+        result = {"skipped": True, "reason": "Node disabled"}
+        update_node(
+            node_id,
+            status="skipped",
+            ended_at=datetime.now(timezone.utc).isoformat(),
+            structured_result=result,
+            summary="Skipped disabled node",
+        )
+        append_event(run_id, "done", actor=actor, node_id=node_id, payload={"summary": "Skipped disabled node", "skipped": True})
+        return {"state": "completed", "step_key": step_key, "output": result, "summary": "Skipped disabled node", "artifacts": []}
+
+    if step_type == "input":
+        config = _step_config(step)
+        key = str(config.get("key") or step.get("key") or step_key)
+        input_type = str(config.get("type") or step.get("input_type") or "text")
+        value = _read_path(context.get("inputs") or {}, key)
+        result = {"key": key, "type": input_type, "value": value}
+        summary = f"Input {key}"
+        update_node(
+            node_id,
+            status="completed",
+            ended_at=datetime.now(timezone.utc).isoformat(),
+            structured_result=result,
+            summary=summary,
+        )
+        append_event(run_id, "done", actor=actor, node_id=node_id, payload={"summary": summary})
+        return {"state": "completed", "step_key": step_key, "output": result, "summary": summary, "artifacts": []}
+
+    if step_type == "prompt":
+        config = _step_config(step)
+        template = step.get("template")
+        if template is None:
+            template = config.get("template") or ""
+        rendered = _resolve_bindings(template, context)
+        result = {"template": template, "rendered": rendered}
+        summary = str(step.get("summary") or _truncate_text(str(rendered), 80)[0] or "Prompt rendered")
+        update_node(
+            node_id,
+            status="completed",
+            ended_at=datetime.now(timezone.utc).isoformat(),
+            structured_result=result,
+            summary=summary,
+        )
+        append_event(run_id, "token", actor=actor, node_id=node_id, payload={"prompt": rendered, "is_test_run": bool(is_test_run)})
+        append_event(run_id, "done", actor=actor, node_id=node_id, payload={"summary": summary})
+        return {"state": "completed", "step_key": step_key, "output": result, "summary": summary, "artifacts": []}
+
+    if step_type in {"agent_instruction", "agent", "agent.run"}:
+        config = _step_config(step)
         prompt = _resolve_bindings(step.get("prompt") or step.get("instruction") or "", context)
+        if not prompt:
+            prompt = _resolve_bindings(config.get("instruction") or config.get("prompt") or "", context)
         payload = {
             "step_id": step_key,
             "prompt": prompt,
@@ -1619,9 +1677,13 @@ def _run_step(
         return {"state": "completed", "step_key": step_key, "output": {"approved": True, "message": message}, "summary": "Approval granted", "artifacts": []}
 
     if step_type == "output":
-        rendered = _resolve_bindings(step.get("value"), context)
+        config = _step_config(step)
+        value = step.get("value")
+        if value is None:
+            value = config.get("value")
+        rendered = _resolve_bindings(value, context)
         if rendered is None:
-            rendered = _resolve_bindings(step.get("template") or "", context)
+            rendered = _resolve_bindings(step.get("template") or config.get("template") or "", context)
         artifact_ids: list[str] = []
         artifact_name = str(step.get("artifact_name") or "").strip()
         if artifact_name:
@@ -1647,6 +1709,101 @@ def _run_step(
         )
         append_event(run_id, "done", actor=actor, node_id=node_id, payload={"summary": summary})
         return {"state": "completed", "step_key": step_key, "output": {"value": rendered}, "summary": summary, "artifacts": artifact_ids}
+
+    if step_type == "trigger.manual":
+        config = _step_config(step)
+        payload = _resolve_bindings(config.get("payload") if "payload" in config else context.get("inputs", {}), context)
+        result = {"payload": payload or {}}
+        update_node(
+            node_id,
+            status="completed",
+            ended_at=datetime.now(timezone.utc).isoformat(),
+            structured_result=result,
+            summary="Manual trigger",
+        )
+        append_event(run_id, "done", actor=actor, node_id=node_id, payload={"summary": "Manual trigger"})
+        return {"state": "completed", "step_key": step_key, "output": result, "summary": "Manual trigger", "artifacts": []}
+
+    if step_type == "core.set":
+        config = _step_config(step)
+        key = str(config.get("key") or step_key)
+        value = _resolve_bindings(config.get("value"), context)
+        result = {"key": key, "value": value}
+        update_node(
+            node_id,
+            status="completed",
+            ended_at=datetime.now(timezone.utc).isoformat(),
+            structured_result=result,
+            summary=f"Set {key}",
+        )
+        append_event(run_id, "done", actor=actor, node_id=node_id, payload={"summary": f"Set {key}"})
+        return {"state": "completed", "step_key": step_key, "output": result, "summary": f"Set {key}", "artifacts": []}
+
+    if step_type == "control.if_else":
+        config = _step_config(step)
+        value = _resolve_bindings(config.get("condition"), context)
+        branch = bool(value)
+        result = {"_branch": branch, "condition": value}
+        update_node(
+            node_id,
+            status="completed",
+            ended_at=datetime.now(timezone.utc).isoformat(),
+            structured_result=result,
+            summary="Condition true" if branch else "Condition false",
+        )
+        append_event(run_id, "done", actor=actor, node_id=node_id, payload={"summary": "Branch selected", "_branch": branch})
+        return {"state": "completed", "step_key": step_key, "output": result, "summary": "Branch selected", "artifacts": []}
+
+    if step_type == "control.merge":
+        result = {"merged": dict(context.get("steps") or {})}
+        update_node(
+            node_id,
+            status="completed",
+            ended_at=datetime.now(timezone.utc).isoformat(),
+            structured_result=result,
+            summary="Merged inputs",
+        )
+        append_event(run_id, "done", actor=actor, node_id=node_id, payload={"summary": "Merged inputs"})
+        return {"state": "completed", "step_key": step_key, "output": result, "summary": "Merged inputs", "artifacts": []}
+
+    if step_type == "output.results_display":
+        config = _step_config(step)
+        value = _resolve_bindings(config.get("value"), context)
+        result = {"value": value}
+        update_node(
+            node_id,
+            status="completed",
+            ended_at=datetime.now(timezone.utc).isoformat(),
+            structured_result=result,
+            summary="Results displayed",
+        )
+        append_event(run_id, "done", actor=actor, node_id=node_id, payload={"summary": "Results displayed"})
+        return {"state": "completed", "step_key": step_key, "output": result, "summary": "Results displayed", "artifacts": []}
+
+    if step_type in {"file.operations", "utility.http_request"}:
+        config = _resolve_bindings(_step_config(step), context)
+        result = {"simulated": True, "parameters": config}
+        update_node(
+            node_id,
+            status="completed",
+            ended_at=datetime.now(timezone.utc).isoformat(),
+            structured_result=result,
+            summary=f"{step_type} simulated",
+        )
+        append_event(run_id, "done", actor=actor, node_id=node_id, payload={"summary": f"{step_type} simulated"})
+        return {"state": "completed", "step_key": step_key, "output": result, "summary": f"{step_type} simulated", "artifacts": []}
+
+    if "." in step_type:
+        msg = f"Node type {step_type} is not implemented"
+        update_node(
+            node_id,
+            status="failed",
+            ended_at=datetime.now(timezone.utc).isoformat(),
+            summary=msg,
+            error=msg,
+        )
+        append_event(run_id, "error", actor=actor, node_id=node_id, payload={"message": msg, "step_id": step_key})
+        return {"state": "error", "step_key": step_key, "error": msg}
 
     raise ValueError(f"Unsupported step type: {step_type}")
 
@@ -1716,6 +1873,33 @@ def run_workflow_definition(
                     "artifacts": result.get("artifacts") or [],
                 }
                 continue
+            if result.get("state") == "error" and bool(step.get("continueOnFail") or step.get("continue_on_fail")):
+                context["steps"][step_key] = {
+                    "output": result.get("output"),
+                    "summary": result.get("summary") or "",
+                    "artifacts": result.get("artifacts") or [],
+                    "error": result.get("error") or "Step failed",
+                }
+                continue
+            if result.get("state") == "error":
+                err = str(result.get("error") or f"Step failed at {step_key}")
+                append_event(
+                    run["run_id"],
+                    "error",
+                    actor=actor,
+                    payload={"message": err, "step_id": step_key},
+                )
+                update_run(
+                    run["run_id"],
+                    status="failed",
+                    ended_at=datetime.now(timezone.utc).isoformat(),
+                    error=err,
+                    metadata=_merge_run_metadata(
+                        get_run(run["run_id"]) or run,
+                        {"step_outputs": context["steps"]},
+                    ),
+                )
+                return get_run(run["run_id"]) or run
             if result.get("state") == "pending_approval":
                 patch = _merge_run_metadata(
                     get_run(run["run_id"]) or run,
