@@ -156,6 +156,162 @@ function syncAppTitlebar() {
   }
 }
 
+function hasPersistedSessionContent(session){
+  if(!session) return false;
+  if(Number(session.message_count||0)>0) return true;
+  if(session.pending_user_message||session.active_stream_id) return true;
+  const msgs=(typeof S!=='undefined'&&Array.isArray(S.messages))?S.messages:[];
+  return msgs.some(m=>m&&m.role&&m.role!=='tool');
+}
+
+function isCurrentSessionBlankForGlobalWorkspace(){
+  return !!(typeof S!=='undefined'&&S&&S.session&&!S.busy&&!hasPersistedSessionContent(S.session));
+}
+
+function _titlebarWorkspaceLabel(path){
+  return path?getWorkspaceFriendlyName(path):(typeof t==='function'?t('no_workspace'):'No workspace');
+}
+
+function syncTitlebarWorkspace(path){
+  const activePath=path||(typeof S!=='undefined'&&S&&(S._profileDefaultWorkspace||''))||'';
+  const label=_titlebarWorkspaceLabel(activePath);
+  const chip=$('titlebarWorkspaceChip');
+  const el=$('titlebarWorkspaceLabel');
+  if(el) el.textContent=label;
+  if(chip){
+    chip.title=(typeof t==='function'?t('titlebar_global_workspace'):'Global workspace')+(activePath?': '+activePath:'');
+    chip.disabled=false;
+  }
+}
+
+function _titlebarInitialForUser(user,label){
+  const source=(user&&(user.display_name||user.username))||label||'Local';
+  const ch=String(source).trim().charAt(0)||'L';
+  return ch.toUpperCase();
+}
+
+function initTitlebarUser(status){
+  const user=status&&status.user?status.user:null;
+  const label=user?(user.display_name||user.username):(typeof t==='function'?t('titlebar_local_user'):'Local');
+  if(typeof S!=='undefined'&&S) S.currentUser=user;
+  const avatar=$('titlebarUserAvatar');
+  const text=$('titlebarUserLabel');
+  if(avatar) avatar.textContent=_titlebarInitialForUser(user,label);
+  if(text) text.textContent=label;
+  renderTitlebarUserMenu(status||{});
+}
+
+function renderTitlebarUserMenu(status){
+  const menu=$('titlebarUserMenu');
+  if(!menu)return;
+  const user=status&&status.user?status.user:null;
+  const label=user?(user.display_name||user.username):(typeof t==='function'?t('titlebar_local_user'):'Local');
+  const username=user&&user.username?('@'+user.username):'';
+  const profile=(user&&user.profile_name)||(typeof S!=='undefined'&&S&&S.activeProfile)||'default';
+  const role=user&&user.role?user.role:'';
+  const canLogout=!!(status&&status.auth_enabled);
+  menu.innerHTML=`
+    <div class="titlebar-user-summary">
+      <span class="titlebar-avatar">${esc(_titlebarInitialForUser(user,label))}</span>
+      <span class="titlebar-menu-item-text">
+        <span class="titlebar-menu-main">${esc(label)}</span>
+        <span class="titlebar-menu-sub">${esc([username,role,profile].filter(Boolean).join(' · '))}</span>
+      </span>
+    </div>
+    <button class="titlebar-menu-item" type="button" onclick="closeTitlebarMenus();switchPanel('settings');switchSettingsSection('users');">
+      <span class="titlebar-menu-item-text"><span class="titlebar-menu-main">${esc(t('titlebar_user_settings'))}</span><span class="titlebar-menu-sub">${esc(profile)}</span></span>
+    </button>
+    ${canLogout?`<button class="titlebar-menu-item" type="button" onclick="closeTitlebarMenus();signOut();"><span class="titlebar-menu-item-text"><span class="titlebar-menu-main">${esc(t('titlebar_logout'))}</span></span></button>`:''}`;
+}
+
+function closeTitlebarMenus(){
+  const ws=$('titlebarWorkspaceDropdown');
+  const user=$('titlebarUserMenu');
+  const wsChip=$('titlebarWorkspaceChip');
+  const userChip=$('titlebarUserChip');
+  if(ws)ws.classList.remove('open');
+  if(user)user.classList.remove('open');
+  if(wsChip)wsChip.classList.remove('active');
+  if(userChip)userChip.classList.remove('active');
+}
+
+function toggleTitlebarUserMenu(){
+  const menu=$('titlebarUserMenu');
+  const chip=$('titlebarUserChip');
+  if(!menu)return;
+  const open=menu.classList.contains('open');
+  closeTitlebarMenus();
+  if(!open){menu.classList.add('open');if(chip)chip.classList.add('active');}
+}
+
+function renderTitlebarWorkspaceDropdown(workspaces,currentPath){
+  const dd=$('titlebarWorkspaceDropdown');
+  if(!dd)return;
+  const rows=(workspaces||[]).map(w=>{
+    const active=w.path===currentPath?' active':'';
+    const jsPath=JSON.stringify(String(w.path||'')).replace(/</g,'\\u003c');
+    return `<button class="titlebar-menu-item${active}" type="button" onclick="applyGlobalWorkspaceSelection(${jsPath})">
+      <span class="titlebar-menu-item-text"><span class="titlebar-menu-main">${esc(w.name||w.path)}</span><span class="titlebar-menu-sub">${esc(w.path||'')}</span></span>
+    </button>`;
+  }).join('');
+  dd.innerHTML=`<div class="titlebar-menu-heading">${esc(t('titlebar_global_workspace'))}</div>${rows||`<div class="titlebar-menu-sub" style="padding:8px 10px">${esc(t('ws_no_results')||'No workspaces found')}</div>`}`;
+}
+
+function toggleTitlebarWorkspaceDropdown(){
+  const dd=$('titlebarWorkspaceDropdown');
+  const chip=$('titlebarWorkspaceChip');
+  if(!dd)return;
+  const open=dd.classList.contains('open');
+  closeTitlebarMenus();
+  if(open)return;
+  loadWorkspaceList().then(data=>{
+    renderTitlebarWorkspaceDropdown(data.workspaces||[],(typeof S!=='undefined'&&S&&S._profileDefaultWorkspace)||data.last||'');
+    dd.classList.add('open');
+    if(chip)chip.classList.add('active');
+  });
+}
+
+async function applyGlobalWorkspaceSelection(path){
+  if(!path)return;
+  const shouldSyncSession=isCurrentSessionBlankForGlobalWorkspace();
+  if(shouldSyncSession&&typeof _previewDirty!=='undefined'&&_previewDirty){
+    const discard=await showConfirmDialog({
+      title:t('discard_file_edits_title'),
+      message:t('discard_file_edits_message'),
+      confirmLabel:t('discard'),
+      danger:true
+    });
+    if(!discard)return;
+    if(typeof cancelEditMode==='function')cancelEditMode();
+    if(typeof clearPreview==='function')clearPreview();
+  }
+  try{
+    closeTitlebarMenus();
+    const data=await api('/api/workspaces/active',{method:'POST',body:JSON.stringify({path})});
+    const workspace=(data&&data.workspace)||{path};
+    S._profileDefaultWorkspace=data.last||workspace.path||path;
+    syncTitlebarWorkspace(S._profileDefaultWorkspace);
+    syncWorkspaceDisplays();
+    if(shouldSyncSession&&S.session){
+      await api('/api/session/update',{method:'POST',body:JSON.stringify({
+        session_id:S.session.session_id, workspace:S._profileDefaultWorkspace, model:S.session.model, model_provider:S.session.model_provider||null
+      })});
+      S.session.workspace=S._profileDefaultWorkspace;
+      syncTopbar();
+      await loadDir('.');
+    }else if(S.session&&S.session.active_stream_id){
+      showToast(t('titlebar_running_chats_keep_workspace'));
+    }
+    showToast(t('workspace_switched_to',workspace.name||getWorkspaceFriendlyName(S._profileDefaultWorkspace)));
+  }catch(e){
+    showToast((t('workspace_switch_failed')||'Workspace switch failed: ')+e.message,'error');
+  }
+}
+
+document.addEventListener('click',e=>{
+  if(!e.target.closest('.titlebar-workspace-wrap')&&!e.target.closest('.titlebar-user-wrap')) closeTitlebarMenus();
+});
+
 function _beginSettingsPanelSession() {
   _settingsDirty = false;
   _settingsThemeOnOpen = localStorage.getItem('hermes-theme') || 'dark';
@@ -4274,7 +4430,9 @@ async function loadWorkspaceList(){
   try{
     const data = await api('/api/workspaces');
     _workspaceList = data.workspaces || [];
+    if(typeof S!=='undefined'&&S) S._profileDefaultWorkspace=data.last||S._profileDefaultWorkspace||'';
     syncWorkspaceDisplays();
+    if(typeof syncTitlebarWorkspace==='function') syncTitlebarWorkspace(data.last||'');
     return data;
   }catch(e){ return {workspaces:[], last:''}; }
 }
@@ -7090,22 +7248,102 @@ function _renderWorkspacesListForSettings(workspaces){
   let html='';
   for(const w of workspaces){
     const isActive=w.path===activePath;
-    html+=`<div class="ws-row" data-path="${esc(w.path)}" style="display:flex;align-items:center;gap:10px;padding:8px 10px;border:1px solid var(--border);border-radius:6px;margin-bottom:4px;cursor:pointer">
-      <span style="color:var(--muted);flex-shrink:0">${li('folder',14)}</span>
-      <div style="flex:1;min-width:0">
-        <div style="font-size:13px;font-weight:500;color:var(--text)">${esc(w.name||w.path)}</div>
-        <div style="font-size:11px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(w.path)}</div>
+    const displayName=esc(w.name||w.path);
+    const activeBadge=isActive?'<span class="settings-ws-active-badge">active</span>':'';
+    html+=`<div class="ws-row settings-ws-row" data-path="${esc(w.path)}">
+      <div class="settings-ws-row-main">
+        <div class="settings-ws-row-info">
+          <span class="settings-ws-row-name">${displayName}</span>
+          <span class="settings-ws-row-path">${esc(w.path)}</span>
+        </div>
+        <div class="settings-ws-row-actions">
+          ${activeBadge}
+          <button type="button" class="users-action-btn settings-ws-edit-btn" data-action="edit" title="${esc(t('edit'))}" aria-label="${esc(t('edit'))}">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/></svg>
+          </button>
+        </div>
       </div>
-      ${isActive?'<span style="font-size:10px;padding:1px 6px;border-radius:8px;background:rgba(61,139,64,.15);color:var(--success);border:1px solid rgba(61,139,64,.3);flex-shrink:0">active</span>':''}
+      <div class="settings-ws-row-edit" data-edit-panel style="display:none"></div>
     </div>`;
   }
   list.innerHTML=html;
   list.querySelectorAll('.ws-row').forEach(row=>{
+    const editBtn=row.querySelector('[data-action="edit"]');
+    if(editBtn) editBtn.onclick=(e)=>{ e.stopPropagation(); toggleWorkspaceDisplayNameEdit(row, workspaces); };
     row.onclick=()=>{
       if(typeof switchPanel==='function') switchPanel('workspaces');
       setTimeout(()=>openWorkspaceDetail(row.dataset.path),50);
     };
   });
+}
+
+function toggleWorkspaceDisplayNameEdit(row, workspaces){
+  if(!row) return;
+  const editPanel=row.querySelector('[data-edit-panel]');
+  if(!editPanel) return;
+  if(editPanel.style.display!=='none'){ editPanel.style.display='none'; return; }
+  document.querySelectorAll('.settings-ws-row [data-edit-panel]').forEach(el=>{ if(el!==editPanel) el.style.display='none'; });
+  const path=row.dataset.path||'';
+  const current=(workspaces.find(w=>w.path===path)||{}).name||'';
+  editPanel.innerHTML=`
+    <div class="users-edit-form" style="padding-top:2px">
+      <div class="users-form-row">
+        <div class="users-form-field" style="flex:1">
+          <label>${esc(t('workspace_name_label') || 'Name')}</label>
+          <input type="text" value="${esc(current)}" placeholder="${esc(t('workspace_name_placeholder') || 'Optional friendly name')}" autocomplete="off">
+        </div>
+      </div>
+      <div class="users-form-actions">
+        <button class="sm-btn" type="button" data-action="save">Save</button>
+        <button class="sm-btn users-cancel-btn" type="button" data-action="cancel">Cancel</button>
+      </div>
+      <div class="detail-form-hint">${esc(path)}</div>
+    </div>`;
+  editPanel.style.display='block';
+  const input=editPanel.querySelector('input');
+  const saveBtn=editPanel.querySelector('[data-action="save"]');
+  const cancelBtn=editPanel.querySelector('[data-action="cancel"]');
+  editPanel.onclick=(e)=>e.stopPropagation();
+  if(input) input.focus();
+  if(saveBtn){
+    saveBtn.onclick=async(e)=>{
+      e.stopPropagation();
+      const name=(input&&input.value||'').trim();
+      if(!name){ showToast(t('name_required') || 'Name is required','error'); return; }
+      await saveWorkspaceDisplayNameFromSettings(path,name,row,editPanel);
+    };
+  }
+  if(cancelBtn){
+    cancelBtn.onclick=(e)=>{ e.stopPropagation(); editPanel.style.display='none'; editPanel.innerHTML=''; };
+  }
+  if(input){
+    input.onkeydown=(e)=>{
+      if(e.key==='Escape'){ e.preventDefault(); editPanel.style.display='none'; editPanel.innerHTML=''; }
+      if(e.key==='Enter'){ e.preventDefault(); saveBtn&&saveBtn.click(); }
+    };
+  }
+}
+
+async function saveWorkspaceDisplayNameFromSettings(path,name,row,editPanel){
+  try{
+    const data=await api('/api/workspaces/rename',{method:'POST',body:JSON.stringify({path,name})});
+    _workspaceList=Array.isArray(data.workspaces)?data.workspaces:[];
+    _renderWorkspacesListForSettings(_workspaceList);
+    renderWorkspacesPanel(_workspaceList);
+    if(typeof syncWorkspaceDisplays==='function') syncWorkspaceDisplays();
+    if(typeof syncTitlebarWorkspace==='function'){
+      const active=(S&&S._profileDefaultWorkspace)||'';
+      syncTitlebarWorkspace(active);
+    }
+    showToast(t('workspace_renamed') || 'Workspace renamed');
+  }catch(e){
+    showToast((t('rename_failed') || 'Rename failed: ') + e.message,'error');
+  }finally{
+    if(editPanel){
+      editPanel.style.display='none';
+      editPanel.innerHTML='';
+    }
+  }
 }
 
 function showWorkspaceFormForSettings(){
