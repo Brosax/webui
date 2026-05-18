@@ -1,7 +1,8 @@
 """Tests for LAN multi-user streaming: skills dir resolution, env lock scope, MCP discovery placement.
 
 These are runtime-focused tests verifying:
-  1. _resolve_skills_dir() returns the shared skills dir in multi-user mode.
+  1. _resolve_skills_dir() returns profile_home / "skills" in multi-user mode,
+     matching Hermes Agent CLI runtime semantics.
   2. _resolve_skills_dir() returns profile_home / "skills" in legacy mode.
   3. SKILLS_DIR patching inside _ENV_LOCK uses _resolve_skills_dir().
   4. MCP discovery runs inside the _ENV_LOCK window (source-level proof).
@@ -18,36 +19,39 @@ import pytest
 
 
 # ---------------------------------------------------------------------------
-# 1. _resolve_skills_dir — multi-user mode returns shared dir
+# 1. _resolve_skills_dir — multi-user mode returns profile skills dir
 # ---------------------------------------------------------------------------
 
 class TestResolveSkillsDirMultiUser:
-    """When is_multi_user_mode() is True, _resolve_skills_dir returns the
-    shared skills directory."""
+    """Even in multi-user mode, runtime slash skills come from the active
+    profile's Hermes Agent skills directory."""
 
-    def test_returns_shared_skills_dir_in_multi_user_mode(self, tmp_path):
-        """is_multi_user_mode() == True => returns get_shared_skills_dir()."""
+    def test_returns_profile_skills_dir_in_multi_user_mode(self, tmp_path):
+        """is_multi_user_mode() == True still uses profile_home / "skills"."""
         shared = tmp_path / "shared_skills"
         shared.mkdir()
+        profile_home = tmp_path / "profile"
 
         with mock.patch("api.users.is_multi_user_mode", return_value=True), \
              mock.patch("api.users.get_shared_skills_dir", return_value=shared):
             from api.streaming import _resolve_skills_dir
-            result = _resolve_skills_dir(str(tmp_path / "profile"))
+            result = _resolve_skills_dir(str(profile_home))
 
-        assert result.resolve() == shared.resolve()
+        assert result == profile_home / "skills"
 
-    def test_shared_dir_called_from_multi_user(self, tmp_path):
-        """Verify the helper actually calls get_shared_skills_dir in multi-user mode."""
+    def test_shared_dir_not_called_from_multi_user_runtime(self, tmp_path):
+        """The shared skills dir is for management UI, not agent runtime."""
         shared = tmp_path / "enterprise_skills"
         shared.mkdir()
+        profile_home = tmp_path / "some_profile"
 
         with mock.patch("api.users.is_multi_user_mode", return_value=True), \
              mock.patch("api.users.get_shared_skills_dir", return_value=shared) as mock_gssd:
             from api.streaming import _resolve_skills_dir
-            _resolve_skills_dir(str(tmp_path / "some_profile"))
+            result = _resolve_skills_dir(str(profile_home))
 
-        mock_gssd.assert_called_once()
+        assert result == profile_home / "skills"
+        mock_gssd.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -205,25 +209,23 @@ class TestEnvLockNotHeldDuringAgentRun:
 
 
 # ---------------------------------------------------------------------------
-# 6. _resolve_skills_dir uses real shared skills dir from api.users
+# 6. _resolve_skills_dir ignores shared skills for runtime loading
 # ---------------------------------------------------------------------------
 
 class TestResolveSkillsDirIntegration:
-    """Integration test: _resolve_skills_dir imports from api.users and
-    returns the actual shared skills dir path."""
+    """Integration test: _resolve_skills_dir stays CLI-compatible."""
 
-    def test_multi_user_returns_state_dir_shared_skills(self, tmp_path):
-        """When HERMES_SHARED_SKILLS_DIR is unset, shared skills default to
-        STATE_DIR / 'shared_skills'. _resolve_skills_dir should return that."""
+    def test_multi_user_returns_profile_skills(self, tmp_path):
+        """Multi-user runtime loading still uses profile_home / 'skills'."""
         fake_state_dir = tmp_path / "state"
-        expected_shared = (fake_state_dir / "shared_skills").resolve()
+        profile_home = tmp_path / "profile"
 
         with mock.patch("api.users.STATE_DIR", fake_state_dir), \
              mock.patch("api.users.is_multi_user_mode", return_value=True):
             from api.streaming import _resolve_skills_dir
-            result = _resolve_skills_dir(str(tmp_path / "profile"))
+            result = _resolve_skills_dir(str(profile_home))
 
-        assert result == expected_shared
+        assert result == profile_home / "skills"
 
     def test_legacy_returns_profile_skills(self, tmp_path):
         """In legacy mode, result is always profile_home / 'skills'."""

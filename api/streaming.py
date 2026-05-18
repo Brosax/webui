@@ -10,6 +10,7 @@ import mimetypes
 import os
 import queue
 import re
+import sys
 import threading
 import time
 import traceback
@@ -43,7 +44,7 @@ _ENV_LOCK = threading.Lock()
 
 
 def _prewarm_skill_tool_modules():
-    """Import tools.skills_tool and tools.skill_manager_tool outside any lock.
+    """Import skill modules outside any lock.
 
     First-time module imports can trigger heavy initialisation (disk I/O,
     transitive imports, plugin discovery).  Performing those imports while
@@ -58,7 +59,7 @@ def _prewarm_skill_tool_modules():
     keeps the lazy-import try/except in one place and makes the intent
     explicit.
     """
-    for _mod_name in ('tools.skills_tool', 'tools.skill_manager_tool'):
+    for _mod_name in ('tools.skills_tool', 'tools.skill_manager_tool', 'agent.skill_commands'):
         try:
             __import__(_mod_name)
         except ImportError:
@@ -428,20 +429,112 @@ def _extract_gateway_routing_metadata(agent, result, requested_model=None, reque
 def _resolve_skills_dir(profile_home: str) -> Path:
     """Return the skills directory for the current agent run.
 
-    In multi-user mode, returns the shared skills directory so every user
-    sees the same shared skill set.  In legacy/single-user mode, returns
-    the profile-local skills directory (profile_home / "skills").
-
-    This is called *inside* the ``_ENV_LOCK`` window so the result is
-    consistent with the concurrent multi-user state at call time.
+    Runtime agent invocations should match Hermes Agent CLI semantics:
+    skills are loaded from the active Hermes profile home, plus any
+    ``skills.external_dirs`` configured there.  The WebUI shared skills
+    directory remains a management/browsing surface; it is not the agent
+    runtime's replacement for ``HERMES_HOME/skills``.
     """
-    try:
-        from api.users import is_multi_user_mode, get_shared_skills_dir
-        if is_multi_user_mode():
-            return get_shared_skills_dir()
-    except Exception:
-        pass
     return Path(profile_home) / "skills"
+
+
+def _patch_skill_tool_modules_for_agent(
+    profile_home: str,
+    skills_dir: Path,
+    modules: tuple[object | None, object | None] | None = None,
+) -> None:
+    """Patch Hermes Agent skill module globals for this agent run."""
+    _ph = Path(profile_home)
+    if modules is None:
+        modules = (
+            sys.modules.get("tools.skills_tool"),
+            sys.modules.get("tools.skill_manager_tool"),
+        )
+    for _mod in modules:
+        if _mod is None:
+            continue
+        try:
+            _mod.HERMES_HOME = _ph
+            _mod.SKILLS_DIR = skills_dir
+        except AttributeError:
+            pass
+
+
+def _split_skill_slash_command(msg: str) -> tuple[str, str] | None:
+    stripped = str(msg or "").strip()
+    if not stripped.startswith("/"):
+        return None
+    first, _, rest = stripped.partition(" ")
+    command = first[1:].strip()
+    if not command:
+        return None
+    return command, rest.strip()
+
+
+def _expand_skill_slash_command_for_agent(
+    msg: str,
+    *,
+    session_id: str | None,
+    hermes_home: str,
+    skills_dir: Path,
+) -> str:
+    """Expand a Hermes Agent /skill command using the active profile context."""
+    parsed = _split_skill_slash_command(msg)
+    if parsed is None:
+        return msg
+
+    command, user_instruction = parsed
+    try:
+        _prewarm_skill_tool_modules()
+        _patch_skill_tool_modules_for_agent(hermes_home, skills_dir)
+        from agent.skill_commands import (
+            build_skill_invocation_message,
+            resolve_skill_command_key,
+            scan_skill_commands,
+        )
+
+        commands = scan_skill_commands()
+        canonical_key = f"/{command.replace('_', '-')}"
+        cmd_key = canonical_key if canonical_key in commands else resolve_skill_command_key(command)
+        if cmd_key is None:
+            logger.warning(
+                "Skill slash command not found: command=%s hermes_home=%s skills_dir=%s",
+                command,
+                hermes_home,
+                skills_dir,
+            )
+            return msg
+
+        expanded = build_skill_invocation_message(
+            cmd_key,
+            user_instruction,
+            task_id=session_id,
+        )
+        if expanded:
+            logger.info(
+                "Expanded skill slash command: command=%s key=%s hermes_home=%s skills_dir=%s",
+                command,
+                cmd_key,
+                hermes_home,
+                skills_dir,
+            )
+            return expanded
+
+        logger.warning(
+            "Skill slash command matched but failed to expand: command=%s key=%s hermes_home=%s skills_dir=%s",
+            command,
+            cmd_key,
+            hermes_home,
+            skills_dir,
+        )
+    except Exception:
+        logger.exception(
+            "Failed to expand skill slash command: command=%s hermes_home=%s skills_dir=%s",
+            command,
+            hermes_home,
+            skills_dir,
+        )
+    return msg
 
 
 def _build_agent_thread_env(profile_runtime_env: dict | None, workspace: str, session_id: str, profile_home: str) -> dict:
@@ -2437,26 +2530,20 @@ def _run_agent_streaming(
                 # above, so we only do lightweight sys.modules lookups and
                 # attribute assignments here — no first-time import under
                 # the lock (#2024).
-                from pathlib import Path as _P
-                import sys as _sys
-                _ph = _P(_profile_home)
-                # Select the correct skills directory: shared in multi-user
-                # mode, profile-local in legacy mode.
+                # Select the Hermes Agent CLI-compatible runtime skills
+                # directory for this profile.
                 _skills_dir = _resolve_skills_dir(_profile_home)
-                _sk = _sys.modules.get('tools.skills_tool')
-                if _sk is not None:
-                    try:
-                        _sk.HERMES_HOME = _ph
-                        _sk.SKILLS_DIR = _skills_dir
-                    except AttributeError:
-                        pass
-                _sm = _sys.modules.get('tools.skill_manager_tool')
-                if _sm is not None:
-                    try:
-                        _sm.HERMES_HOME = _ph
-                        _sm.SKILLS_DIR = _skills_dir
-                    except AttributeError:
-                        pass
+                _skill_modules = (
+                    sys.modules.get('tools.skills_tool'),
+                    sys.modules.get('tools.skill_manager_tool'),
+                )
+                _patch_skill_tool_modules_for_agent(_profile_home, _skills_dir, _skill_modules)
+                msg_text = _expand_skill_slash_command_for_agent(
+                    msg_text,
+                    session_id=session_id,
+                    hermes_home=_profile_home,
+                    skills_dir=_skills_dir,
+                )
             # ── MCP Server Discovery (inside env window) ──
             # MUST run while HERMES_HOME is set to the active profile.
             # `discover_mcp_tools()` reads `~/.hermes/config.yaml` via
