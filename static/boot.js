@@ -1449,6 +1449,7 @@ function applyBotName(){
     const _bootAuthStatus=await api('/api/auth/status');
     bootAuthStatus=_bootAuthStatus||null;
   }catch(e){bootAuthStatus=null;}
+  if(typeof initTitlebarUser==='function') initTitlebarUser(bootAuthStatus||{});
   // Fetch active profile
   try{const p=await api('/api/profile/active');S.activeProfile=p.name||'default';}catch(e){S.activeProfile='default';}
   // Update profile chip label immediately

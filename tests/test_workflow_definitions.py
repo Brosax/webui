@@ -151,3 +151,27 @@ def test_test_run_uses_draft_without_publish():
     meta = run.get("metadata") or {}
     assert meta.get("is_test_run") is True
     assert meta.get("workflow_version_id") is None
+
+
+def test_delete_workflow_definition_removes_versions_and_definition():
+    from api.workflow_trace import (
+        create_workflow_definition,
+        publish_workflow_definition,
+        list_workflow_versions,
+        get_workflow_definition,
+        delete_workflow_definition,
+    )
+
+    created = create_workflow_definition(
+        name="delete-me",
+        created_by="alice",
+        project_id="proj-a",
+        draft_steps=[{"step_id": "s1", "type": "agent_instruction", "prompt": "hello"}],
+    )
+    publish_workflow_definition(created["workflow_id"], actor="alice")
+    assert len(list_workflow_versions(created["workflow_id"])) == 1
+
+    assert delete_workflow_definition(created["workflow_id"]) is True
+    assert get_workflow_definition(created["workflow_id"]) is None
+    assert list_workflow_versions(created["workflow_id"]) == []
+    assert delete_workflow_definition(created["workflow_id"]) is False

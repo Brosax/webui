@@ -3671,7 +3671,6 @@ def handle_get(handler, parsed) -> bool:
         handler.send_header("Cache-Control", "no-cache")
         handler.send_header("Connection", "keep-alive")
         handler.end_headers()
-        import time
         while True:
             run = get_run(run_id)
             nodes = list_run_nodes(run_id)
@@ -4990,11 +4989,7 @@ def handle_post(handler, parsed) -> bool:
     _canvas_match = _canvas_pattern.match(parsed.path or "")
     if _canvas_match and handler.command == "POST":
         is_run = bool(_canvas_match.group(1))
-        body = read_body(handler)
-        try:
-            data = json.loads(body) if body else {}
-        except json.JSONDecodeError:
-            return bad(handler, "Invalid JSON", 400)
+        data = body if isinstance(body, dict) else {}
         current_user = _current_user(handler)
         username = current_user.get("username", "unknown") if current_user else "unknown"
 
@@ -5002,11 +4997,12 @@ def handle_post(handler, parsed) -> bool:
             from api.workflow_trace import run_canvas_workflow
             try:
                 run = run_canvas_workflow(
-                    workflow_id=None,
+                    workflow_id=data.get("workflow_id"),
                     actor=username,
                     inputs=data.get("inputs", {}),
                     inline_nodes=data.get("nodes", []),
                     inline_edges=data.get("edges", []),
+                    is_test_run=True,
                 )
                 return j(handler, {"success": True, "data": run})
             except Exception as exc:
@@ -5951,6 +5947,12 @@ def handle_post(handler, parsed) -> bool:
         if scope_err:
             return scope_err
         return _handle_workspace_add(handler, body)
+
+    if parsed.path == "/api/workspaces/active":
+        scope_err = _require_scope(handler, "files")
+        if scope_err:
+            return scope_err
+        return _handle_workspace_active(handler, body)
 
     if parsed.path == "/api/workspaces/remove":
         scope_err = _require_scope(handler, "files")
@@ -6975,6 +6977,7 @@ def _handle_list_dir(handler, parsed):
         return scope_err
     qs = parse_qs(parsed.query)
     sid = qs.get("session_id", [""])[0]
+    workspace_path = (qs.get("workspace_path", [""])[0] or "").strip()
     if not sid:
         return bad(handler, "session_id is required")
     try:
@@ -7000,6 +7003,19 @@ def _handle_list_dir(handler, parsed):
             workspace = cli_meta.get("workspace", "")
         except Exception:
             return bad(handler, "Session not found", 404)
+    if workspace_path:
+        try:
+            workspace = str(resolve_trusted_workspace(workspace_path))
+        except Exception as e:
+            return bad(handler, _sanitize_error(e), 404)
+        user = _current_user(handler)
+        if user:
+            try:
+                ws_resolved = Path(workspace).resolve()
+            except Exception:
+                return bad(handler, "Invalid workspace path", 400)
+            if not is_workspace_allowed_for_user(ws_resolved, user, write=False):
+                return bad(handler, "Workspace access denied for read", 403)
     try:
         return j(
             handler,
@@ -9411,6 +9427,22 @@ def _handle_workspace_add(handler, body):
     wss.append({"path": str(p), "name": name or p.name})
     save_workspaces(wss)
     return j(handler, {"ok": True, "workspaces": wss})
+
+
+def _handle_workspace_active(handler, body):
+    path_str = str(body.get("path", "") or "").strip()
+    if not path_str:
+        return bad(handler, "path is required")
+    try:
+        resolved = str(resolve_trusted_workspace(path_str))
+    except ValueError as e:
+        return bad(handler, str(e), 404)
+    workspaces = load_workspaces()
+    match = next((w for w in workspaces if str(w.get("path", "")) == resolved), None)
+    if not match:
+        return bad(handler, "Workspace not found", 404)
+    set_last_workspace(resolved)
+    return j(handler, {"ok": True, "last": resolved, "workspace": match})
 
 
 def _handle_workspace_remove(handler, body):

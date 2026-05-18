@@ -65,6 +65,32 @@
         { key: "instruction", label: "Instruction", type: "code", default: "" },
       ],
     },
+    "file.input": {
+      type: "file.input",
+      label: "File Input",
+      category: "Files",
+      accent: "#6fcf97",
+      inputs: [{ id: "in", label: "Trigger", type: "flow" }],
+      outputs: [{ id: "out", label: "Preview", type: "file" }],
+      parameters: [
+        { key: "path", label: "Path", type: "file", default: "{{inputs.file_path}}" },
+        { key: "file_type", label: "File Type", type: "select", options: ["text", "markdown", "json", "csv"], default: "text" },
+      ],
+    },
+    "file.output": {
+      type: "file.output",
+      label: "File Output",
+      category: "Outputs",
+      accent: "#56ccf2",
+      inputs: [{ id: "in", label: "Value", type: "any" }],
+      outputs: [],
+      parameters: [
+        { key: "destination", label: "Destination", type: "select", options: ["artifact", "screen"], default: "artifact" },
+        { key: "filename", label: "Filename", type: "string", default: "result.txt" },
+        { key: "format", label: "Format", type: "select", options: ["text", "json"], default: "text" },
+        { key: "template", label: "Template", type: "code", default: "{{last_output.message}}" },
+      ],
+    },
     "output.results_display": {
       type: "output.results_display",
       label: "Results",
@@ -72,7 +98,11 @@
       accent: "#56ccf2",
       inputs: [{ id: "in", label: "Value", type: "any" }],
       outputs: [],
-      parameters: [{ key: "value", label: "Value", type: "string", default: "" }],
+      parameters: [
+        { key: "destination", label: "Destination", type: "select", options: ["screen", "artifact"], default: "screen" },
+        { key: "format", label: "Format", type: "select", options: ["text", "json"], default: "text" },
+        { key: "template", label: "Template", type: "code", default: "{{last_output.message}}" },
+      ],
     },
     "file.operations": {
       type: "file.operations",
@@ -125,9 +155,10 @@
   const templates = [
     { id: "blank", label: "Blank", nodes: [], edges: [] },
     { id: "basic-agent", label: "Basic Agent", nodes: ["trigger.manual", "agent.run", "output.results_display"] },
+    { id: "simulated-file-agent", label: "Sim File Agent", nodes: ["trigger.manual", "file.input", "agent.run", "output.results_display"] },
     { id: "branch", label: "Branch", nodes: ["trigger.manual", "control.if_else", "output.results_display"] },
     { id: "http", label: "HTTP", nodes: ["trigger.manual", "utility.http_request", "output.results_display"] },
-    { id: "file", label: "File", nodes: ["trigger.manual", "file.operations", "output.results_display"] },
+    { id: "file", label: "File", nodes: ["trigger.manual", "file.input", "agent.run", "file.output"] },
     { id: "set", label: "Set Value", nodes: ["trigger.manual", "core.set", "output.results_display"] },
     { id: "merge", label: "Merge", nodes: ["trigger.manual", "control.merge", "output.results_display"] },
     { id: "llm", label: "LLM Draft", nodes: ["trigger.manual", "llm.generate", "output.results_display"] },

@@ -8,6 +8,7 @@ import os
 import re
 import sqlite3
 import threading
+import time
 import traceback
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -722,7 +723,8 @@ def _run_row(row: sqlite3.Row | None) -> Optional[dict]:
 # ---------------------------------------------------------------------------
 @_with_lock
 def create_node(run_id: str, agent_name: str, parent_node_id: str = None,
-                name: str = None, skill_snapshot: dict = None) -> Optional[dict]:
+                name: str = None, skill_snapshot: dict = None,
+                status: str = "running") -> Optional[dict]:
     """Create a new node within a run."""
     conn = _get_conn()
     run = get_run(run_id)
@@ -738,13 +740,15 @@ def create_node(run_id: str, agent_name: str, parent_node_id: str = None,
         redacted, _ = _apply_redaction_to_value(skill_snapshot)
         skill_json = json.dumps(redacted, ensure_ascii=False)
 
+    started_at = now if status == "running" else None
+
     conn.execute(
         """
         INSERT INTO workflow_nodes
             (node_id, run_id, parent_node_id, agent_name, name, status, started_at, skill_snapshot, created_at)
-        VALUES (?, ?, ?, ?, ?, 'running', ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (node_id, run_id, parent_node_id, agent_name, name, now, skill_json, now)
+        (node_id, run_id, parent_node_id, agent_name, name, status, started_at, skill_json, now)
     )
     conn.execute(
         "UPDATE workflow_runs SET node_count = node_count + 1, updated_at = ? WHERE run_id = ?",
@@ -778,7 +782,7 @@ def update_node(node_id: str, **kwargs) -> Optional[dict]:
         return None
 
     allowed = {
-        "status", "ended_at", "structured_result", "summary", "artifacts", "error"
+        "status", "started_at", "ended_at", "structured_result", "summary", "artifacts", "error"
     }
     setters = []
     values = []
@@ -1270,6 +1274,17 @@ def update_workflow_definition(workflow_id: str, **kwargs) -> Optional[dict]:
         (workflow_id,),
     ).fetchone()
     return _definition_row(updated)
+
+
+@_with_lock
+def delete_workflow_definition(workflow_id: str) -> bool:
+    conn = _get_conn()
+    cur = conn.execute(
+        "DELETE FROM workflow_definitions WHERE workflow_id = ?",
+        (workflow_id,),
+    )
+    conn.commit()
+    return cur.rowcount > 0
 
 
 @_with_lock
@@ -1998,6 +2013,361 @@ def load_canvas_definition(workflow_id: str) -> Optional[dict]:
     return {"workflow_id": workflow_id, "nodes": nodes, "edges": edges}
 
 
+def _edge_endpoints(edge: dict) -> tuple[str, str]:
+    return (
+        str(edge.get("source") or edge.get("from") or ""),
+        str(edge.get("target") or edge.get("to") or ""),
+    )
+
+
+def _canvas_node_id(node: dict, index: int) -> str:
+    return str(node.get("id") or node.get("step_id") or f"node_{index + 1}")
+
+
+def _canvas_node_type(node: dict) -> str:
+    raw = str(node.get("type") or "").strip()
+    if raw == "agent":
+        return "agent.run"
+    if raw == "output":
+        return "output.results_display"
+    if raw in {"input", "file_input"}:
+        return "file.input"
+    if raw == "file_output":
+        return "file.output"
+    return raw or "agent.run"
+
+
+def _canvas_node_config(node: dict) -> dict:
+    params = node.get("parameters") if isinstance(node.get("parameters"), dict) else None
+    if params is None:
+        params = node.get("config") if isinstance(node.get("config"), dict) else {}
+    return dict(params or {})
+
+
+def _canvas_node_label(node: dict, index: int) -> str:
+    return str(node.get("name") or node.get("label") or node.get("id") or f"Node {index + 1}")
+
+
+def _linear_canvas_path(nodes: list[dict], edges: list[dict]) -> list[dict]:
+    if not nodes:
+        raise ValueError("Workflow has no nodes")
+
+    node_by_id = {_canvas_node_id(node, idx): node for idx, node in enumerate(nodes)}
+    incoming = {node_id: [] for node_id in node_by_id}
+    outgoing = {node_id: [] for node_id in node_by_id}
+    for edge in edges or []:
+        source, target = _edge_endpoints(edge)
+        if source not in node_by_id or target not in node_by_id:
+            raise ValueError("Edges must connect existing nodes")
+        incoming[target].append(source)
+        outgoing[source].append(target)
+
+    for node_id, targets in outgoing.items():
+        if len(targets) > 1:
+            raise ValueError("V1 only supports a single linear path")
+    for node_id, sources in incoming.items():
+        if len(sources) > 1:
+            raise ValueError("V1 only supports one upstream input per node")
+
+    if not edges:
+        return list(nodes)
+
+    trigger_ids = [
+        node_id for node_id, node in node_by_id.items()
+        if _canvas_node_type(node) == "trigger.manual"
+    ]
+    start_candidates = [node_id for node_id, sources in incoming.items() if not sources]
+    if len(trigger_ids) == 1:
+        start = trigger_ids[0]
+        if incoming[start]:
+            raise ValueError("Manual trigger must be the workflow start")
+    elif len(start_candidates) == 1:
+        start = start_candidates[0]
+    else:
+        raise ValueError("V1 workflow must have one linear start node")
+
+    ordered_ids = []
+    seen = set()
+    current = start
+    while current:
+        if current in seen:
+            raise ValueError("Workflow graph contains a cycle")
+        seen.add(current)
+        ordered_ids.append(current)
+        next_nodes = outgoing.get(current) or []
+        current = next_nodes[0] if next_nodes else None
+
+    if len(ordered_ids) != len(nodes):
+        raise ValueError("V1 only supports one connected linear path")
+    return [node_by_id[node_id] for node_id in ordered_ids]
+
+
+def _canvas_delay_seconds(node_type: str, inputs: dict) -> float:
+    override = inputs.get("_simulate_delay_ms")
+    if override is not None:
+        try:
+            return max(0, float(override) / 1000.0)
+        except (TypeError, ValueError):
+            pass
+    delays = {
+        "trigger.manual": 0.2,
+        "file.input": 0.7,
+        "file.operations": 0.7,
+        "agent.run": 1.2,
+        "output.results_display": 0.5,
+        "file.output": 0.5,
+    }
+    return delays.get(node_type, 0.5)
+
+
+def _workspace_root() -> Path:
+    raw = os.getenv("HERMES_WEBUI_DEFAULT_WORKSPACE") or os.getcwd()
+    return Path(raw).expanduser().resolve()
+
+
+def _read_workspace_preview(path_value: str, limit: int = 16_384) -> dict:
+    root = _workspace_root()
+    raw = str(path_value or "").strip()
+    if not raw:
+        return {"path": "", "exists": False, "simulated": True, "content_preview": "No file path provided."}
+    path = Path(raw).expanduser()
+    if not path.is_absolute():
+        path = root / path
+    try:
+        resolved = path.resolve()
+    except OSError:
+        resolved = path
+    try:
+        resolved.relative_to(root)
+    except ValueError:
+        return {
+            "path": raw,
+            "exists": False,
+            "simulated": True,
+            "content_preview": f"Simulated preview for {raw}; file is outside the workspace.",
+        }
+    try:
+        data = resolved.read_bytes()[:limit]
+        text = data.decode("utf-8", errors="replace")
+        stat = resolved.stat()
+        return {
+            "path": str(resolved),
+            "name": resolved.name,
+            "exists": True,
+            "size": stat.st_size,
+            "simulated": False,
+            "content_preview": text,
+        }
+    except OSError as exc:
+        return {
+            "path": str(resolved),
+            "name": resolved.name,
+            "exists": False,
+            "simulated": True,
+            "content_preview": f"Simulated preview for {resolved.name}: {exc}",
+        }
+
+
+def _short_summary(value: Any, limit: int = 180) -> str:
+    if value is None:
+        return ""
+    text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+    text = re.sub(r"\s+", " ", text).strip()
+    return _truncate_text(text, limit)[0]
+
+
+def _mark_canvas_remaining_skipped(node_records: list[dict], start_index: int, actor: str, reason: str) -> None:
+    now = datetime.now(timezone.utc).isoformat()
+    for record in node_records[start_index:]:
+        node = get_node(record["node_id"])
+        if not node or node.get("status") not in ("pending", "running"):
+            continue
+        update_node(
+            record["node_id"],
+            status="skipped",
+            ended_at=now,
+            summary=reason,
+        )
+        append_event(
+            record["run_id"],
+            "node_skipped",
+            actor=actor,
+            node_id=record["node_id"],
+            payload={"summary": reason, "canvas_node_id": record.get("canvas_node_id")},
+        )
+
+
+def _execute_canvas_node(run_id: str, node_record: dict, context: dict, actor: str) -> dict:
+    node = node_record["canvas_node"]
+    node_type = node_record["canvas_node_type"]
+    node_id = node_record["node_id"]
+    config = _canvas_node_config(node)
+    canvas_id = node_record["canvas_node_id"]
+
+    if node_type == "trigger.manual":
+        payload = _resolve_bindings(config.get("payload") if "payload" in config else context.get("inputs", {}), context)
+        return {"output": {"payload": payload or {}}, "summary": "Manual trigger received inputs", "artifacts": []}
+
+    if node_type in {"file.input", "file.operations"}:
+        operation = str(config.get("operation") or "read").lower()
+        if node_type == "file.operations" and operation != "read":
+            return {
+                "output": {"simulated": True, "operation": operation, "parameters": _resolve_bindings(config, context)},
+                "summary": f"File operation simulated: {operation}",
+                "artifacts": [],
+            }
+        path_value = _resolve_bindings(context.get("inputs", {}).get("file_path") or config.get("path") or config.get("file_path") or "", context)
+        file_type = _resolve_bindings(context.get("inputs", {}).get("file_type") or config.get("file_type") or config.get("type") or "text", context)
+        preview = _read_workspace_preview(str(path_value or ""))
+        preview["file_type"] = file_type or "text"
+        return {
+            "output": preview,
+            "summary": f"File input: {preview.get('name') or preview.get('path') or 'simulated'}",
+            "artifacts": [],
+        }
+
+    if node_type == "agent.run":
+        upstream = context.get("last_output")
+        instruction = _resolve_bindings(
+            config.get("instruction") or config.get("prompt") or context.get("inputs", {}).get("topic") or "Process the input.",
+            context,
+        )
+        input_preview = _short_summary(upstream, 600)
+        message = (
+            f"Simulated agent response for: {instruction}\n\n"
+            f"Input preview: {input_preview or 'No upstream input.'}"
+        )
+        structured = {
+            "input_type": type(upstream).__name__,
+            "summary": _short_summary(input_preview, 220),
+            "simulated": True,
+        }
+        return {
+            "output": {"message": message, "structured_result": structured, "input": upstream},
+            "summary": "Agent simulation completed",
+            "artifacts": [],
+        }
+
+    if node_type in {"output.results_display", "file.output"}:
+        destination = str(config.get("destination") or ("artifact" if node_type == "file.output" else "screen")).lower()
+        template = config.get("template")
+        if template is None:
+            template = config.get("value")
+        rendered = _resolve_bindings(template if template is not None else "{{last_output}}", context)
+        if rendered is None:
+            rendered = context.get("last_output")
+        fmt = str(config.get("format") or "text").lower()
+        text = rendered if isinstance(rendered, str) else json.dumps(rendered, ensure_ascii=False, indent=2)
+        artifact_ids: list[str] = []
+        if destination in {"artifact", "file"} or node_type == "file.output":
+            filename = str(config.get("filename") or config.get("artifact_name") or f"{canvas_id}.{('json' if fmt == 'json' else 'txt')}")
+            artifact = create_artifact(
+                run_id,
+                node_id=node_id,
+                name=filename,
+                artifact_type="data" if fmt == "json" else "document",
+                content=text,
+                metadata={"canvas_node_id": canvas_id, "destination": destination, "format": fmt},
+            )
+            if artifact:
+                artifact_ids.append(artifact["artifact_id"])
+        return {
+            "output": {"destination": destination, "format": fmt, "value": rendered},
+            "summary": "Output generated",
+            "artifacts": artifact_ids,
+        }
+
+    raise ValueError(f"Node type {node_type} is not implemented in simulated workflow V1")
+
+
+def _run_canvas_worker(run_id: str, node_records: list[dict], actor: str, inputs: dict) -> None:
+    context = {"inputs": inputs or {}, "steps": {}, "last_output": None}
+    try:
+        append_event(run_id, "run_started", actor=actor, payload={"mode": "simulated_canvas_v1"})
+        for index, record in enumerate(node_records):
+            run = get_run(run_id)
+            if not run or run.get("status") == "cancelled":
+                _mark_canvas_remaining_skipped(node_records, index, actor, "Skipped after cancellation")
+                return
+
+            now = datetime.now(timezone.utc).isoformat()
+            update_node(record["node_id"], status="running", started_at=now)
+            append_event(
+                run_id,
+                "node_start",
+                actor=actor,
+                node_id=record["node_id"],
+                payload={
+                    "canvas_node_id": record["canvas_node_id"],
+                    "step_type": record["canvas_node_type"],
+                    "step_name": record["canvas_node_name"],
+                },
+            )
+            time.sleep(_canvas_delay_seconds(record["canvas_node_type"], inputs or {}))
+            run = get_run(run_id)
+            if not run or run.get("status") == "cancelled":
+                update_node(record["node_id"], status="skipped", ended_at=now, summary="Skipped after cancellation")
+                _mark_canvas_remaining_skipped(node_records, index + 1, actor, "Skipped after cancellation")
+                return
+
+            result = _execute_canvas_node(run_id, record, context, actor)
+            output = result.get("output")
+            context["last_output"] = output
+            context["steps"][record["canvas_node_id"]] = {
+                "output": output,
+                "summary": result.get("summary") or "",
+                "artifacts": result.get("artifacts") or [],
+            }
+            update_node(
+                record["node_id"],
+                status="completed",
+                ended_at=datetime.now(timezone.utc).isoformat(),
+                structured_result=output,
+                summary=result.get("summary") or "Completed",
+                artifacts=json.dumps(result.get("artifacts") or [], ensure_ascii=False),
+            )
+            append_event(
+                run_id,
+                "node_done",
+                actor=actor,
+                node_id=record["node_id"],
+                payload={"summary": result.get("summary") or "Completed", "canvas_node_id": record["canvas_node_id"]},
+            )
+
+        append_event(run_id, "done", actor=actor, payload={"summary": "Workflow completed"})
+        update_run(
+            run_id,
+            status="completed",
+            ended_at=datetime.now(timezone.utc).isoformat(),
+            metadata=_merge_run_metadata(get_run(run_id) or {}, {"step_outputs": context["steps"]}),
+        )
+    except Exception as exc:
+        message = str(exc) or "Workflow execution failed"
+        failing_index = next((idx for idx, rec in enumerate(node_records) if get_node(rec["node_id"] or "") and get_node(rec["node_id"]).get("status") == "running"), 0)
+        for idx, record in enumerate(node_records):
+            node = get_node(record["node_id"])
+            if node and node.get("status") == "running":
+                failing_index = idx
+                update_node(
+                    record["node_id"],
+                    status="failed",
+                    ended_at=datetime.now(timezone.utc).isoformat(),
+                    summary=message,
+                    error=message,
+                )
+                append_event(run_id, "node_error", actor=actor, node_id=record["node_id"], payload={"message": message})
+                break
+        _mark_canvas_remaining_skipped(node_records, failing_index + 1, actor, "Skipped after upstream failure")
+        append_event(run_id, "error", actor=actor, payload={"message": message, "stack": traceback.format_exc()})
+        update_run(
+            run_id,
+            status="failed",
+            ended_at=datetime.now(timezone.utc).isoformat(),
+            error=message,
+            metadata=_merge_run_metadata(get_run(run_id) or {}, {"step_outputs": context.get("steps", {})}),
+        )
+
+
 def run_canvas_workflow(workflow_id=None, actor="unknown", inputs=None,
                          inline_nodes=None, inline_edges=None, is_test_run=False) -> dict:
     """Run a canvas workflow.
@@ -2005,7 +2375,7 @@ def run_canvas_workflow(workflow_id=None, actor="unknown", inputs=None,
     Accepts either a saved workflow_id (load from DB) or inline nodes/edges dict.
     Executes nodes sequentially and returns the run record.
     """
-    if workflow_id is None and inline_nodes is not None:
+    if inline_nodes is not None:
         nodes = list(inline_nodes)
         edges = list(inline_edges or [])
     elif workflow_id:
@@ -2017,27 +2387,53 @@ def run_canvas_workflow(workflow_id=None, actor="unknown", inputs=None,
     else:
         raise ValueError("Either workflow_id or inline_nodes must be provided")
 
-    context = {"inputs": inputs or {}, "artifacts": {}, "steps": {}}
-    run_name = f"Canvas run {workflow_id or 'inline'}"
-    run = create_run(name=run_name, created_by=actor, metadata={"workflow_id": workflow_id})
-    try:
-        for idx, node in enumerate(nodes):
-            result = _run_canvas_node(run, node, idx, context)
-            step_key = str(node.get("id") or f"node_{idx}")
-            if result.get("state") == "completed":
-                context["steps"][step_key] = {
-                    "output": result.get("output", {}),
-                    "summary": result.get("summary", ""),
-                    "artifacts": result.get("artifacts", []),
-                }
-            elif result.get("state") == "error":
-                update_run(run["run_id"], status="failed", error=result.get("error"))
-                return get_run(run["run_id"])
-        update_run(run["run_id"], status="completed")
-        return get_run(run["run_id"])
-    except Exception as exc:
-        update_run(run["run_id"], status="failed", error=str(exc))
-        return get_run(run["run_id"])
+    ordered_nodes = _linear_canvas_path(nodes, edges)
+    run_name = f"Test run: {workflow_id or 'current canvas'}"
+    run = create_run(
+        name=run_name,
+        created_by=actor,
+        metadata={
+            "workflow_id": workflow_id,
+            "is_test_run": bool(is_test_run),
+            "mode": "simulated_canvas_v1",
+            "input_values": inputs or {},
+            "canvas_edges": edges,
+        },
+    )
+
+    node_records: list[dict] = []
+    parent_node_id = None
+    for index, node in enumerate(ordered_nodes):
+        canvas_id = _canvas_node_id(node, index)
+        node_type = _canvas_node_type(node)
+        created = create_node(
+            run["run_id"],
+            agent_name=f"workflow:{node_type}",
+            parent_node_id=parent_node_id,
+            name=_canvas_node_label(node, index),
+            skill_snapshot={"canvas_node_id": canvas_id, "canvas_node_type": node_type},
+            status="pending",
+        )
+        if not created:
+            raise RuntimeError(f"Failed to create node for {canvas_id}")
+        parent_node_id = created["node_id"]
+        node_records.append({
+            "run_id": run["run_id"],
+            "node_id": created["node_id"],
+            "canvas_node": node,
+            "canvas_node_id": canvas_id,
+            "canvas_node_type": node_type,
+            "canvas_node_name": _canvas_node_label(node, index),
+        })
+
+    thread = threading.Thread(
+        target=_run_canvas_worker,
+        args=(run["run_id"], node_records, actor, inputs or {}),
+        name=f"workflow-canvas-{run['run_id']}",
+        daemon=True,
+    )
+    thread.start()
+    return get_run(run["run_id"]) or run
 
 
 def _run_canvas_node(run, node, index, context) -> dict:

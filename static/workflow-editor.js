@@ -2,7 +2,9 @@
 (function () {
   function nodeTypeForLegacy(type) {
     if (type === "agent") return "agent.run";
+    if (type === "input" || type === "file_input") return "file.input";
     if (type === "output") return "output.results_display";
+    if (type === "file_output") return "file.output";
     return type || "agent.run";
   }
 

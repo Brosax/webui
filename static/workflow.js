@@ -18,11 +18,23 @@ let _workflowSource = null;
 let _workflowSourceChecksum = null;
 let _workflowSourcePath = null;
 let _workflowSourceCompatibility = false;
+let _workflowFilterQuery = '';
+let _workflowActionMenu = null;
+let _workflowActionAnchor = null;
+let _workflowActionWorkflowId = null;
+let _workflowRenamingId = null;
+
+const WORKFLOW_ICONS = {
+  more: '<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" stroke="none"><circle cx="8" cy="3" r="1.25"/><circle cx="8" cy="8" r="1.25"/><circle cx="8" cy="13" r="1.25"/></svg>',
+  edit: '<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"><path d="M11.5 2.5l2 2L5 13H3v-2z"/><path d="M10 4l2 2"/></svg>',
+  trash: '<svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><path d="M3.5 4.5h9M6.5 4.5V3h3v1.5M4.5 4.5v8.5h7v-8.5"/><line x1="7" y1="7" x2="7" y2="11"/><line x1="9" y1="7" x2="9" y2="11"/></svg>',
+};
 
 let _currentTrace = null;
 let _traceTimeline = [];
 let _traceArtifactCache = {};
 let _traceTimelineCollapsed = false;
+let _workflowTracePollTimer = null;
 
 // ── Load & Navigation ───────────────────────────────────────────────────────
 
@@ -31,6 +43,7 @@ async function loadWorkflowTasks() {
   try {
     if (refreshBtn) { refreshBtn.style.opacity = '0.5'; refreshBtn.disabled = true; }
     _workflowLegacyMode = false;
+    _stopWorkflowTracePolling();
     const res = await api('/api/workflow/definitions');
     _workflowDefinitions = (res && res.data) ? res.data : [];
     _workflowMode = 'list';
@@ -154,6 +167,7 @@ function _setWorkflowHeaderButtons(mode) {
 }
 
 function closeTraceDetail() {
+  _stopWorkflowTracePolling();
   if (_workflowMode === 'trace' || _workflowMode === 'run_detail') {
     if (_workflowCurrentDef) {
       _workflowMode = 'definition';
@@ -173,25 +187,22 @@ function closeTraceDetail() {
 function renderDefinitionList() {
   const list = document.getElementById('workflowList');
   if (!list) return;
+  if (_workflowActionAnchor && !_workflowActionAnchor.isConnected) closeWorkflowActionMenu();
   if (_workflowLegacyMode) {
     renderLegacyRunList(list);
     return;
   }
+  const defs = _getFilteredWorkflowDefinitions();
   if (!_workflowDefinitions.length) {
-    list.innerHTML = _renderWorkflowSourceActions() + '<p style="padding:12px;color:var(--muted);font-size:12px">No workflows yet</p>';
+    list.innerHTML = '<p style="padding:12px;color:var(--muted);font-size:12px">No workflows yet</p>';
     return;
   }
-  list.innerHTML = _renderWorkflowSourceActions() + _workflowDefinitions.map(renderDefinitionCard).join('');
-}
-
-function _renderWorkflowSourceActions() {
-  return `
-    <div class="workflow-source-actions">
-      <button class="btn btn-sm btn-accent" onclick="openWorkflowCreate()">New blank</button>
-      <button class="btn btn-sm" onclick="openWorkflowCreateTemplate()">New from template</button>
-      <button class="btn btn-sm" onclick="openWorkflowImport()">Import Markdown</button>
-    </div>
-  `;
+  if (!defs.length) {
+    list.innerHTML = '<div class="workflow-list-empty">No workflows match your search.</div>';
+    return;
+  }
+  list.innerHTML = defs.map(renderDefinitionRow).join('');
+  _bindWorkflowDefinitionRowHandlers(list, defs);
 }
 
 function renderLegacyRunList(list) {
@@ -227,23 +238,250 @@ function renderLegacyRunCard(run) {
   `;
 }
 
-function renderDefinitionCard(definition) {
+function renderDefinitionRow(definition) {
   const selected = _workflowCurrentDef && _workflowCurrentDef.workflow_id === definition.workflow_id;
-  const status = escapeHtml(definition.status || 'draft');
-  const project = definition.project_id ? `<span>${escapeHtml(definition.project_id)}</span>` : '<span>private</span>';
+  const workflowId = escapeHtml(definition.workflow_id);
+  const workflowName = escapeHtml(definition.name || 'Untitled Workflow');
+  const meta = `${definition.status || 'draft'} • ${formatTimeAgo(definition.updated_at)}`;
   return `
-    <div class="workflow-card trace-run-card${selected ? ' active' : ''}" onclick="openWorkflowDefinition('${escapeHtml(definition.workflow_id)}')">
-      <div class="workflow-card-header">
-        <span class="workflow-card-icon">🧩</span>
-        <span class="workflow-card-name">${escapeHtml(definition.name || 'Untitled Workflow')}</span>
-        <span class="workflow-status ${status === 'published' ? 'completed' : 'running'}">${status}</span>
+    <div class="session-item workflow-session-item${selected ? ' active' : ''}" data-workflow-id="${workflowId}" tabindex="0">
+      <div class="session-text workflow-session-text">
+        <div class="session-title-row">
+          <div class="session-title workflow-session-title">${workflowName}</div>
+        </div>
+        <div class="session-meta workflow-session-meta">${escapeHtml(meta)}</div>
       </div>
-      <div class="workflow-card-meta">
-        ${project}
-        <span class="workflow-card-time">${formatTimeAgo(definition.updated_at)}</span>
+      <div class="session-actions workflow-session-actions">
+        <button type="button" class="session-actions-trigger workflow-actions-trigger" data-workflow-actions="${workflowId}" aria-haspopup="menu" aria-label="Workflow actions" title="Workflow actions">
+          ${WORKFLOW_ICONS.more}
+        </button>
       </div>
     </div>
   `;
+}
+
+function filterWorkflowDefinitions() {
+  _workflowFilterQuery = (document.getElementById('workflowSearch')?.value || '').trim();
+  renderDefinitionList();
+}
+
+function _getFilteredWorkflowDefinitions() {
+  const query = _workflowFilterQuery.trim().toLowerCase();
+  if (!query) return _workflowDefinitions;
+  return _workflowDefinitions.filter((definition) => {
+    return [
+      definition?.name || '',
+      definition?.project_id || '',
+      definition?.workflow_id || '',
+    ].some((value) => String(value).toLowerCase().includes(query));
+  });
+}
+
+function _bindWorkflowDefinitionRowHandlers(list, definitions) {
+  list.querySelectorAll('.workflow-session-item').forEach((row) => {
+    const workflowId = row.dataset.workflowId;
+    const definition = definitions.find((item) => item.workflow_id === workflowId);
+    if (!definition) return;
+    row.addEventListener('click', (event) => {
+      if (event.target.closest('.workflow-session-actions')) return;
+      openWorkflowDefinition(workflowId);
+    });
+    row.addEventListener('keydown', (event) => {
+      if (event.target.closest('.workflow-session-actions')) return;
+      if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault();
+        openWorkflowDefinition(workflowId);
+      }
+    });
+    row._startRename = () => _startWorkflowInlineRename(definition, row);
+  });
+  list.querySelectorAll('.workflow-actions-trigger').forEach((btn) => {
+    btn.addEventListener('click', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const workflowId = btn.dataset.workflowActions;
+      const definition = definitions.find((item) => item.workflow_id === workflowId);
+      if (definition) _openWorkflowActionMenu(definition, btn);
+    });
+  });
+}
+
+function _startWorkflowInlineRename(definition, row) {
+  if (!definition || !row || _workflowRenamingId === definition.workflow_id) return;
+  closeWorkflowActionMenu();
+  _workflowRenamingId = definition.workflow_id;
+  row.classList.add('menu-open');
+  const title = row.querySelector('.workflow-session-title');
+  if (!title) {
+    _workflowRenamingId = null;
+    row.classList.remove('menu-open');
+    return;
+  }
+  const oldName = definition.name || 'Untitled Workflow';
+  const input = document.createElement('input');
+  input.className = 'session-title-input workflow-title-input';
+  input.value = oldName;
+  ['click', 'mousedown', 'dblclick', 'pointerdown'].forEach((type) => {
+    input.addEventListener(type, (event) => event.stopPropagation());
+  });
+  let finishDone = false;
+  const releaseRename = () => {
+    _workflowRenamingId = null;
+    row.classList.remove('menu-open');
+    if (input.isConnected) input.replaceWith(title);
+  };
+  const applyName = (nextName, updateDom = true) => {
+    definition.name = nextName;
+    const cached = _workflowDefinitions.find((item) => item && item.workflow_id === definition.workflow_id);
+    if (cached) cached.name = nextName;
+    if (_workflowCurrentDef && _workflowCurrentDef.workflow_id === definition.workflow_id) {
+      _workflowCurrentDef.name = nextName;
+      const detailTitle = document.getElementById('workflowDetailTitle');
+      if (detailTitle && _workflowMode === 'definition') detailTitle.textContent = nextName;
+    }
+    if (updateDom) title.textContent = nextName;
+  };
+  const finish = async(save) => {
+    if (finishDone) return;
+    finishDone = true;
+    if (!save) {
+      applyName(oldName, false);
+      releaseRename();
+      return;
+    }
+    const newName = input.value.trim() || 'Untitled Workflow';
+    try {
+      if (newName !== oldName) {
+        const res = await api(`/api/workflow/definitions/${definition.workflow_id}`, {
+          method: 'PATCH',
+          body: JSON.stringify({ name: newName }),
+        });
+        const updated = res.data || {};
+        Object.assign(definition, updated);
+        const cached = _workflowDefinitions.find((item) => item && item.workflow_id === definition.workflow_id);
+        if (cached) Object.assign(cached, updated);
+        if (_workflowCurrentDef && _workflowCurrentDef.workflow_id === definition.workflow_id) {
+          _workflowCurrentDef = Object.assign(_workflowCurrentDef, updated);
+        }
+      }
+      applyName(newName);
+      renderDefinitionList();
+    } catch (err) {
+      applyName(oldName, false);
+      showToast('Failed to rename workflow: ' + (err?.message || err));
+    } finally {
+      releaseRename();
+    }
+  };
+  input.onkeydown = (event) => {
+    if (event.key === 'Enter') {
+      if (window._isImeEnter && window._isImeEnter(event)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      finish(true);
+    }
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      event.stopPropagation();
+      finish(false);
+    }
+  };
+  input.onblur = () => {
+    if (_workflowRenamingId === definition.workflow_id) finish(false);
+  };
+  title.replaceWith(input);
+  setTimeout(() => {
+    input.focus();
+    input.select();
+  }, 10);
+}
+
+function _buildWorkflowAction(label, meta, icon, onSelect, extraClass = '') {
+  const opt = document.createElement('button');
+  opt.type = 'button';
+  opt.className = 'ws-opt session-action-opt' + (extraClass ? ` ${extraClass}` : '');
+  opt.innerHTML =
+    `<span class="ws-opt-action">`
+      + `<span class="ws-opt-icon">${icon}</span>`
+      + `<span class="session-action-copy">`
+        + `<span class="ws-opt-name">${escapeHtml(label)}</span>`
+        + (meta ? `<span class="session-action-meta">${escapeHtml(meta)}</span>` : '')
+      + `</span>`
+    + `</span>`;
+  opt.onclick = async(event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    await onSelect();
+  };
+  return opt;
+}
+
+function _positionWorkflowActionMenu(anchorEl) {
+  if (!_workflowActionMenu || !anchorEl) return;
+  const rect = anchorEl.getBoundingClientRect();
+  const menuW = Math.min(280, Math.max(220, _workflowActionMenu.scrollWidth || 220));
+  let left = rect.right - menuW;
+  if (left < 8) left = 8;
+  if (left + menuW > window.innerWidth - 8) left = window.innerWidth - menuW - 8;
+  _workflowActionMenu.style.left = left + 'px';
+  _workflowActionMenu.style.top = '8px';
+  const menuH = _workflowActionMenu.offsetHeight || 0;
+  let top = rect.bottom + 6;
+  if (top + menuH > window.innerHeight - 8 && rect.top > menuH + 12) top = rect.top - menuH - 6;
+  if (top < 8) top = 8;
+  _workflowActionMenu.style.top = top + 'px';
+}
+
+function closeWorkflowActionMenu() {
+  if (_workflowActionMenu) {
+    _workflowActionMenu.remove();
+    _workflowActionMenu = null;
+  }
+  if (_workflowActionAnchor) {
+    _workflowActionAnchor.classList.remove('active');
+    const row = _workflowActionAnchor.closest('.workflow-session-item');
+    if (row) row.classList.remove('menu-open');
+    _workflowActionAnchor = null;
+  }
+  _workflowActionWorkflowId = null;
+}
+
+function _openWorkflowActionMenu(definition, anchorEl) {
+  if (_workflowActionMenu && _workflowActionWorkflowId === definition.workflow_id && _workflowActionAnchor === anchorEl) {
+    closeWorkflowActionMenu();
+    return;
+  }
+  closeWorkflowActionMenu();
+  const menu = document.createElement('div');
+  menu.className = 'session-action-menu open workflow-action-menu';
+  menu.appendChild(_buildWorkflowAction(
+    'Rename',
+    'Edit this workflow name inline',
+    WORKFLOW_ICONS.edit,
+    () => {
+      closeWorkflowActionMenu();
+      const row = document.querySelector('.workflow-session-item[data-workflow-id="' + definition.workflow_id + '"]');
+      if (row && typeof row._startRename === 'function') row._startRename();
+    }
+  ));
+  menu.appendChild(_buildWorkflowAction(
+    'Delete',
+    'Remove this workflow definition',
+    WORKFLOW_ICONS.trash,
+    async() => {
+      closeWorkflowActionMenu();
+      await deleteWorkflowDefinition(definition.workflow_id);
+    },
+    'danger'
+  ));
+  document.body.appendChild(menu);
+  _workflowActionMenu = menu;
+  _workflowActionAnchor = anchorEl;
+  _workflowActionWorkflowId = definition.workflow_id;
+  anchorEl.classList.add('active');
+  const row = anchorEl.closest('.workflow-session-item');
+  if (row) row.classList.add('menu-open');
+  _positionWorkflowActionMenu(anchorEl);
 }
 
 async function openWorkflowDefinition(workflowId) {
@@ -324,6 +562,26 @@ function _renderWorkflowCanvasEditor(def) {
         </aside>
         <section class="workflow-canvas-stage">
           <svg id="workflow-definition-canvas-svg" class="workflow-canvas-svg"></svg>
+          <div class="workflow-canvas-controls" aria-label="Canvas view controls">
+            <div class="workflow-canvas-controls-group" role="group">
+              <button type="button" class="workflow-canvas-control-btn" onclick="zoomWorkflowCanvasIn()" title="Zoom In" aria-label="Zoom In">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><path d="M11 8v6M8 11h6M16.5 16.5 21 21"></path></svg>
+              </button>
+              <button type="button" class="workflow-canvas-control-btn" onclick="zoomWorkflowCanvasOut()" title="Zoom Out" aria-label="Zoom Out">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><path d="M8 11h6M16.5 16.5 21 21"></path></svg>
+              </button>
+              <button type="button" class="workflow-canvas-control-btn" onclick="fitWorkflowCanvasView()" title="Fit View" aria-label="Fit View">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 3H5a2 2 0 0 0-2 2v3M16 3h3a2 2 0 0 1 2 2v3M8 21H5a2 2 0 0 1-2-2v-3M16 21h3a2 2 0 0 0 2-2v-3"></path><path d="M9 9h6v6H9z"></path></svg>
+              </button>
+              <button type="button" class="workflow-canvas-control-btn" onclick="resetWorkflowCanvasZoom()" title="Reset 100%" aria-label="Reset 100%">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7V4h3M20 17v3h-3M5 19l14-14"></path><path d="M9 5h10v10"></path><path d="M15 19H5V9"></path></svg>
+              </button>
+              <button type="button" id="workflowCanvasLockButton" class="workflow-canvas-control-btn workflow-canvas-lock-btn" onclick="toggleWorkflowCanvasLock()" title="Lock Nodes" aria-label="Lock Nodes" aria-pressed="false">
+                <svg class="workflow-canvas-lock-icon workflow-canvas-lock-icon--unlocked" viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="11" width="14" height="10" rx="2"></rect><path d="M8 11V8a4 4 0 0 1 7.6-1.8"></path></svg>
+                <svg class="workflow-canvas-lock-icon workflow-canvas-lock-icon--locked" viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="11" width="14" height="10" rx="2"></rect><path d="M8 11V8a4 4 0 0 1 8 0v3"></path></svg>
+              </button>
+            </div>
+          </div>
           <svg id="workflow-minimap" class="workflow-minimap" viewBox="0 0 200 150"></svg>
         </section>
         <aside class="canvas-config-panel workflow-properties-panel" id="workflow-properties-panel"><div class="canvas-config-empty">Select a node to configure</div></aside>
@@ -532,7 +790,12 @@ async function publishWorkflowDefinition() {
 async function runWorkflowDefinition(isTestRun) {
   if (!_workflowCurrentDef) return;
   let inputs = {};
-  const raw = window.prompt('Run inputs (JSON object)', '{}');
+  const defaultInputs = {
+    file_path: 'README.md',
+    file_type: 'markdown',
+    topic: 'summarize this file'
+  };
+  const raw = window.prompt('Run inputs (JSON object)', JSON.stringify(defaultInputs, null, 2));
   if (raw === null) return;
   try {
     const parsed = JSON.parse(raw || '{}');
@@ -542,12 +805,26 @@ async function runWorkflowDefinition(isTestRun) {
     showToast('Invalid run inputs JSON: ' + e.message);
     return;
   }
-  const endpoint = isTestRun ? 'test-run' : 'run';
   try {
-    const res = await api(`/api/workflow/definitions/${_workflowCurrentDef.workflow_id}/${endpoint}`, {
-      method: 'POST',
-      body: JSON.stringify({ inputs }),
-    });
+    let res;
+    if (isTestRun && _workflowTab === 'canvas') {
+      const state = window.getWorkflowEditorState ? window.getWorkflowEditorState() : { nodes: _canvasNodes || [], edges: _canvasEdges || [] };
+      res = await api('/api/workflow/canvas/run', {
+        method: 'POST',
+        body: JSON.stringify({
+          workflow_id: _workflowCurrentDef.workflow_id,
+          inputs,
+          nodes: state.nodes || [],
+          edges: state.edges || [],
+        }),
+      });
+    } else {
+      const endpoint = isTestRun ? 'test-run' : 'run';
+      res = await api(`/api/workflow/definitions/${_workflowCurrentDef.workflow_id}/${endpoint}`, {
+        method: 'POST',
+        body: JSON.stringify({ inputs }),
+      });
+    }
     const run = res.data;
     showToast(isTestRun ? 'Test run started' : 'Run started');
     if (run && run.run_id) {
@@ -565,6 +842,61 @@ function openWorkflowCreate() {
   const sourcePath = window.prompt('Workspace source path:', `workflows/${_slugifyWorkflow(name)}.workflow.md`);
   if (!sourcePath) return;
   createWorkflowDefinitionImpl(name.trim(), sourcePath, 'blank');
+}
+
+function openWorkflowCreateMenu(event) {
+  if (event) {
+    event.preventDefault();
+    event.stopPropagation();
+  }
+  const anchor = event?.currentTarget;
+  const existing = document.getElementById('workflowCreateMenu');
+  if (existing) existing.remove();
+
+  const menu = document.createElement('div');
+  menu.id = 'workflowCreateMenu';
+  menu.className = 'workflow-create-menu';
+  menu.innerHTML = `
+    <button type="button" class="workflow-create-menu-item" data-action="blank">New blank</button>
+    <button type="button" class="workflow-create-menu-item" data-action="template">New from template</button>
+    <button type="button" class="workflow-create-menu-item" data-action="import">Import Markdown</button>
+  `;
+  document.body.appendChild(menu);
+
+  const close = () => {
+    document.removeEventListener('mousedown', onOutsideClick);
+    document.removeEventListener('keydown', onEscape);
+    menu.remove();
+  };
+  const onOutsideClick = (evt) => {
+    if (!menu.contains(evt.target) && evt.target !== anchor) close();
+  };
+  const onEscape = (evt) => {
+    if (evt.key === 'Escape') close();
+  };
+  document.addEventListener('mousedown', onOutsideClick);
+  document.addEventListener('keydown', onEscape);
+
+  menu.querySelectorAll('.workflow-create-menu-item').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const action = btn.dataset.action;
+      close();
+      if (action === 'blank') openWorkflowCreate();
+      else if (action === 'template') openWorkflowCreateTemplate();
+      else if (action === 'import') openWorkflowImport();
+    });
+  });
+
+  if (anchor) {
+    const rect = anchor.getBoundingClientRect();
+    let left = rect.left;
+    let top = rect.bottom + 6;
+    const width = 182;
+    if (left + width > window.innerWidth - 8) left = window.innerWidth - width - 8;
+    if (left < 8) left = 8;
+    menu.style.left = `${left}px`;
+    menu.style.top = `${top}px`;
+  }
 }
 
 function openWorkflowCreateTemplate() {
@@ -618,6 +950,50 @@ async function importWorkflowDefinitionImpl(sourcePath) {
   }
 }
 
+async function deleteWorkflowDefinition(workflowId) {
+  if (!workflowId) return;
+  const definition = _workflowDefinitions.find(d => d.workflow_id === workflowId) || _workflowCurrentDef;
+  const name = definition?.name || 'this workflow';
+  if (!window.confirm(`Delete "${name}"?`)) return;
+  try {
+    await api(`/api/workflow/definitions/${workflowId}`, { method: 'DELETE' });
+    showToast('Workflow deleted');
+    if (_workflowCurrentDef?.workflow_id === workflowId) {
+      _workflowCurrentDef = null;
+      _workflowRuns = [];
+      _workflowVersions = [];
+      _workflowSource = null;
+      _workflowSourceChecksum = null;
+      _workflowSourcePath = null;
+      _workflowSourceCompatibility = false;
+      _workflowMode = 'list';
+      _workflowRunDetail = null;
+      _currentTrace = null;
+    }
+    await loadWorkflowTasks();
+  } catch (e) {
+    showToast('Failed to delete workflow: ' + e.message);
+  }
+}
+
+document.addEventListener('click', (event) => {
+  if (!_workflowActionMenu) return;
+  if (_workflowActionMenu.contains(event.target)) return;
+  if (_workflowActionAnchor && _workflowActionAnchor.contains(event.target)) return;
+  closeWorkflowActionMenu();
+});
+document.addEventListener('scroll', (event) => {
+  if (!_workflowActionMenu) return;
+  if (_workflowActionMenu.contains(event.target)) return;
+  closeWorkflowActionMenu();
+}, true);
+document.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape' && _workflowActionMenu) closeWorkflowActionMenu();
+});
+window.addEventListener('resize', () => {
+  if (_workflowActionMenu && _workflowActionAnchor) _positionWorkflowActionMenu(_workflowActionAnchor);
+});
+
 function openLatestDefinitionTrace() {
   const latest = (_workflowRuns || [])[0];
   if (latest?.run_id) openTraceView(latest.run_id);
@@ -636,12 +1012,12 @@ function _initWorkflowDefinitionCanvas() {
 }
 
 function _canvasNodeFromStep(step, idx) {
-  const typeMap = { agent_instruction: 'agent', file_input: 'input', file_output: 'output' };
+  const typeMap = { agent_instruction: 'agent.run', agent: 'agent.run', input: 'file.input', file_input: 'file.input', file_output: 'file.output', output: 'output.results_display' };
   const type = typeMap[step.type] || step.type || 'agent';
   const cfg = Object.assign({}, step.config || {});
-  if (type === 'agent' && !cfg.instruction) cfg.instruction = step.prompt || step.instruction || '';
+  if (type === 'agent.run' && !cfg.instruction) cfg.instruction = step.prompt || step.instruction || '';
   if (type === 'prompt' && !cfg.template) cfg.template = step.template || '';
-  if (type === 'output' && cfg.value === undefined) cfg.value = step.value || '';
+  if (type === 'output.results_display' && cfg.value === undefined) cfg.value = step.value || '';
   return {
     id: step.step_id || step.id || `node_${idx + 1}`,
     type,
@@ -810,14 +1186,40 @@ function _renderRunDetailContent(run) {
 }
 
 async function openTraceView(runId) {
+  _stopWorkflowTracePolling();
   try {
     const res = await api(`/api/workflow/runs/${runId}/trace`);
     _currentTrace = res.data || null;
     _workflowMode = 'trace';
     _buildTimeline();
     renderWorkflowPanel();
+    if (_currentTrace?.run?.status === 'running') _startWorkflowTracePolling(runId);
   } catch (e) {
     showToast('Failed to load trace: ' + e.message);
+  }
+}
+
+function _startWorkflowTracePolling(runId) {
+  _stopWorkflowTracePolling();
+  _workflowTracePollTimer = setInterval(async () => {
+    try {
+      const res = await api(`/api/workflow/runs/${runId}/trace`);
+      _currentTrace = res.data || null;
+      _buildTimeline();
+      if (_workflowMode === 'trace') renderWorkflowPanel();
+      const status = _currentTrace?.run?.status;
+      if (!['running', 'pending_approval'].includes(status)) _stopWorkflowTracePolling();
+    } catch (e) {
+      _stopWorkflowTracePolling();
+      showToast('Trace polling stopped: ' + e.message);
+    }
+  }, 800);
+}
+
+function _stopWorkflowTracePolling() {
+  if (_workflowTracePollTimer) {
+    clearInterval(_workflowTracePollTimer);
+    _workflowTracePollTimer = null;
   }
 }
 
@@ -866,17 +1268,73 @@ function _renderTraceViewContent() {
   const nodes = _currentTrace.nodes || [];
   const events = _currentTrace.events || [];
   const artifacts = _currentTrace.artifacts || [];
+  const currentNode = nodes.find(node => node.status === 'running');
+  const finalOutput = _findFinalTraceOutput(nodes);
   return `
     <div class="trace-timeline" id="traceTimeline">
       <div class="trace-summary">
         <div class="trace-stat"><span class="trace-stat-num">${nodes.length}</span><span class="trace-stat-label">Nodes</span></div>
         <div class="trace-stat"><span class="trace-stat-num">${events.length}</span><span class="trace-stat-label">Events</span></div>
         <div class="trace-stat"><span class="trace-stat-num">${artifacts.length}</span><span class="trace-stat-label">Artifacts</span></div>
+        <div class="trace-run-state">
+          <span class="workflow-status ${escapeHtml(run.status || '')}">${escapeHtml(run.status || '')}</span>
+          <strong>${currentNode ? `Now running: ${escapeHtml(currentNode.name || currentNode.agent_name || currentNode.node_id)}` : _traceRunStatusLabel(run)}</strong>
+        </div>
       </div>
+      <div class="trace-node-list">
+        ${nodes.length ? nodes.map((node, idx) => renderTraceNodeCard(node, idx)).join('') : '<p style="padding:12px;color:var(--muted);font-size:12px">No nodes recorded yet.</p>'}
+      </div>
+      ${finalOutput ? `<div class="trace-final-output"><h4>Result</h4><pre class="detail-code">${escapeHtml(finalOutput)}</pre></div>` : ''}
+      <details class="trace-raw-events" ${_traceTimelineCollapsed ? '' : 'open'}>
+        <summary>Raw events</summary>
       <div class="trace-events">
         ${_traceTimeline.length ? _traceTimeline.map(item => renderTimelineItem(item)).join('') : '<p style="padding:12px;color:var(--muted);font-size:12px">No events recorded yet.</p>'}
       </div>
+      </details>
     </div>
+  `;
+}
+
+function _traceRunStatusLabel(run) {
+  if (run.status === 'completed') return 'Workflow completed';
+  if (run.status === 'failed') return run.error ? `Failed: ${escapeHtml(run.error)}` : 'Workflow failed';
+  if (run.status === 'cancelled') return 'Workflow cancelled';
+  return 'Waiting for workflow progress';
+}
+
+function _findFinalTraceOutput(nodes) {
+  const completed = (nodes || []).filter(node => node.status === 'completed' && node.structured_result);
+  const outputNode = completed.slice().reverse().find(node => String(node.agent_name || '').includes('output'));
+  const node = outputNode || completed[completed.length - 1];
+  if (!node) return '';
+  const result = node.structured_result;
+  if (result && Object.prototype.hasOwnProperty.call(result, 'value')) {
+    return typeof result.value === 'string' ? result.value : JSON.stringify(result.value, null, 2);
+  }
+  if (result && result.message) return result.message;
+  return JSON.stringify(result, null, 2);
+}
+
+function renderTraceNodeCard(node, index) {
+  const status = node.status || 'pending';
+  const icon = {'pending':'○','running':'●','completed':'✓','failed':'!','skipped':'-','cancelled':'×'}[status] || '•';
+  const result = node.structured_result;
+  const summary = node.summary || node.error || '';
+  return `
+    <article class="trace-node-card trace-node-card-${escapeHtml(status)}" data-node-id="${escapeHtml(node.node_id)}">
+      <div class="trace-node-index">${index + 1}</div>
+      <div class="trace-node-main">
+        <div class="trace-node-card-head">
+          <span class="trace-node-status-dot">${icon}</span>
+          <strong>${escapeHtml(node.name || node.agent_name || node.node_id)}</strong>
+          <span class="workflow-status ${escapeHtml(status)}">${escapeHtml(status)}</span>
+        </div>
+        <div class="trace-node-type">${escapeHtml(node.agent_name || '')}</div>
+        ${summary ? `<p class="trace-node-summary">${escapeHtml(summary)}</p>` : ''}
+        ${result ? `<details class="trace-node-output"><summary>Output preview</summary><pre class="detail-code">${escapeHtml(_compactPayload(result, 1200))}</pre></details>` : ''}
+        ${node.artifacts && node.artifacts.length > 0 ? `<div class="node-artifacts-list">${node.artifacts.map(artId => renderArtifactChip(artId)).join('')}</div>` : ''}
+      </div>
+    </article>
   `;
 }
 
@@ -1172,8 +1630,10 @@ window.loadWorkflowTasks = loadWorkflowTasks;
 window.renderWorkflowPanel = renderWorkflowPanel;
 window.openWorkflowDefinition = openWorkflowDefinition;
 window.openWorkflowCreate = openWorkflowCreate;
+window.openWorkflowCreateMenu = openWorkflowCreateMenu;
 window.openWorkflowCreateTemplate = openWorkflowCreateTemplate;
 window.openWorkflowImport = openWorkflowImport;
+window.deleteWorkflowDefinition = deleteWorkflowDefinition;
 window.saveWorkflowDefinition = saveWorkflowDefinition;
 window.publishWorkflowDefinition = publishWorkflowDefinition;
 window.runWorkflowDefinition = runWorkflowDefinition;
