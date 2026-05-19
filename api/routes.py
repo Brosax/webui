@@ -6045,6 +6045,24 @@ def handle_post(handler, parsed) -> bool:
         from api.streaming import _handle_chat_steer
         return _handle_chat_steer(handler, body)
 
+    if parsed.path == "/api/commands/exec":
+        scope_err = _require_scope(handler, "chat")
+        if scope_err:
+            return scope_err
+        from api.commands import execute_plugin_command
+
+        command = str(body.get("command", "") or "").strip()
+        if not command:
+            return bad(handler, "command is required")
+        try:
+            return j(handler, {"output": execute_plugin_command(command)})
+        except ValueError as e:
+            return bad(handler, str(e), 400)
+        except KeyError:
+            return bad(handler, "Plugin command not found", 404)
+        except RuntimeError as e:
+            return bad(handler, _sanitize_error(e), 500)
+
     if parsed.path == "/api/terminal/start":
         return _handle_terminal_start(handler, body)
 

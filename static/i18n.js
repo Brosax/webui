@@ -49,6 +49,9 @@ const LOCALES = {
     copy: 'Copy',
     copied: 'Copied!',
     copy_failed: 'Copy failed',
+    selected_text_reply: 'Reply with selection',
+    selected_text_reply_title: 'Append selected chat text as quoted context',
+    selected_text_reply_appended: 'Selected text added to composer',
 
     diff_loading: 'Loading diff',
     diff_error: 'Could not load patch file',

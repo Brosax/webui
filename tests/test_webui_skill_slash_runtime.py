@@ -1,107 +1,13 @@
-"""Regression coverage for WebUI Hermes skill slash expansion."""
+"""Regression coverage for WebUI Hermes skill slash runtime context."""
 
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 pytest.importorskip("yaml")
-
-
-def _write_skill(root: Path, dirname: str, name: str, body: str = "Follow this test skill.") -> None:
-    skill_dir = root / dirname
-    skill_dir.mkdir(parents=True, exist_ok=True)
-    (skill_dir / "SKILL.md").write_text(
-        f"---\nname: {name}\ndescription: Test skill {name}\n---\n\n{body}\n",
-        encoding="utf-8",
-    )
-
-
-def test_runtime_skill_expansion_uses_first_slash_token_and_passes_args(tmp_path, monkeypatch):
-    from api.streaming import _expand_skill_slash_command_for_agent
-
-    profile_home = tmp_path / "hermes-home"
-    skills_dir = profile_home / "skills"
-    _write_skill(skills_dir, "codex", "codex", "Inspect carefully.")
-
-    monkeypatch.setenv("HERMES_HOME", str(profile_home))
-
-    expanded = _expand_skill_slash_command_for_agent(
-        "/codex inspect this",
-        session_id="session-123",
-        hermes_home=str(profile_home),
-        skills_dir=skills_dir,
-    )
-
-    assert "[IMPORTANT: The user has invoked" in expanded
-    assert '"codex" skill' in expanded
-    assert "Inspect carefully." in expanded
-    assert "inspect this" in expanded
-
-
-def test_runtime_skill_expansion_uses_profile_skills_not_shared_skills(tmp_path, monkeypatch):
-    from api.streaming import _expand_skill_slash_command_for_agent
-
-    profile_home = tmp_path / "hermes-home"
-    profile_skills = profile_home / "skills"
-    shared_skills = tmp_path / "shared_skills"
-    _write_skill(profile_skills, "dogfood", "dogfood", "Profile skill content.")
-    shared_skills.mkdir(parents=True)
-
-    monkeypatch.setenv("HERMES_HOME", str(profile_home))
-
-    expanded = _expand_skill_slash_command_for_agent(
-        "/dogfood test",
-        session_id="session-456",
-        hermes_home=str(profile_home),
-        skills_dir=profile_skills,
-    )
-
-    assert "[IMPORTANT: The user has invoked" in expanded
-    assert "Profile skill content." in expanded
-    assert "test" in expanded
-
-
-def test_runtime_skill_expansion_supports_command_without_args(tmp_path, monkeypatch):
-    from api.streaming import _expand_skill_slash_command_for_agent
-
-    profile_home = tmp_path / "hermes-home"
-    skills_dir = profile_home / "skills"
-    _write_skill(skills_dir, "solo-skill", "solo skill", "No args skill body.")
-
-    monkeypatch.setenv("HERMES_HOME", str(profile_home))
-
-    expanded = _expand_skill_slash_command_for_agent(
-        "/solo-skill",
-        session_id="session-789",
-        hermes_home=str(profile_home),
-        skills_dir=skills_dir,
-    )
-
-    assert "[IMPORTANT: The user has invoked" in expanded
-    assert "No args skill body." in expanded
-
-
-def test_unknown_runtime_skill_is_preserved_and_logged(tmp_path, monkeypatch, caplog):
-    from api.streaming import _expand_skill_slash_command_for_agent
-
-    profile_home = tmp_path / "hermes-home"
-    skills_dir = profile_home / "skills"
-    skills_dir.mkdir(parents=True)
-    monkeypatch.setenv("HERMES_HOME", str(profile_home))
-
-    original = "/unknown-skill args"
-    expanded = _expand_skill_slash_command_for_agent(
-        original,
-        session_id="session-missing",
-        hermes_home=str(profile_home),
-        skills_dir=skills_dir,
-    )
-
-    assert expanded == original
-    assert "Skill slash command not found" in caplog.text
-    assert "unknown-skill" in caplog.text
 
 
 def test_runtime_skills_dir_matches_cli_profile_home_in_multi_user_mode(tmp_path, monkeypatch):
@@ -115,3 +21,55 @@ def test_runtime_skills_dir_matches_cli_profile_home_in_multi_user_mode(tmp_path
     monkeypatch.setattr("api.users.get_shared_skills_dir", lambda: shared)
 
     assert _resolve_skills_dir(str(profile_home)) == profile_home / "skills"
+
+
+def test_agent_thread_env_marks_webui_session_and_profile_home(tmp_path):
+    from api.streaming import _build_agent_thread_env
+
+    profile_home = tmp_path / "hermes-home"
+    workspace = tmp_path / "workspace"
+    env = _build_agent_thread_env(
+        {"TERMINAL_CWD": "/from/profile", "CUSTOM_PROFILE_VALUE": "1"},
+        str(workspace),
+        "session-123",
+        str(profile_home),
+    )
+
+    assert env["TERMINAL_CWD"] == str(workspace)
+    assert env["HERMES_EXEC_ASK"] == "1"
+    assert env["HERMES_SESSION_KEY"] == "session-123"
+    assert env["HERMES_SESSION_ID"] == "session-123"
+    assert env["HERMES_SESSION_PLATFORM"] == "webui"
+    assert env["HERMES_HOME"] == str(profile_home)
+    assert env["CUSTOM_PROFILE_VALUE"] == "1"
+
+
+def test_skill_module_patch_uses_profile_home_skills_dir(tmp_path, monkeypatch):
+    from api.streaming import _patch_skill_tool_modules_for_agent
+
+    profile_home = tmp_path / "hermes-home"
+    skills_dir = profile_home / "skills"
+    skills_tool = SimpleNamespace()
+    skill_manager_tool = SimpleNamespace()
+
+    def fail_profiles_patch(*_args, **_kwargs):
+        raise RuntimeError("force fallback path")
+
+    monkeypatch.setattr("api.profiles.patch_skill_home_modules", fail_profiles_patch)
+
+    _patch_skill_tool_modules_for_agent(
+        str(profile_home),
+        skills_dir,
+        modules=(skills_tool, skill_manager_tool),
+    )
+
+    assert skills_tool.HERMES_HOME == Path(profile_home)
+    assert skills_tool.SKILLS_DIR == skills_dir
+    assert skill_manager_tool.HERMES_HOME == Path(profile_home)
+    assert skill_manager_tool.SKILLS_DIR == skills_dir
+
+
+def test_webui_no_longer_expands_skill_slash_commands_before_agent_run():
+    import api.streaming as streaming
+
+    assert not hasattr(streaming, "_expand_skill_slash_command_for_agent")

@@ -468,98 +468,6 @@ def _patch_skill_tool_modules_for_agent(
             pass
 
 
-def _split_skill_slash_command(msg: str) -> tuple[str, str] | None:
-    stripped = str(msg or "").strip()
-    if not stripped.startswith("/"):
-        return None
-    first, _, rest = stripped.partition(" ")
-    command = first[1:].strip()
-    if not command:
-        return None
-    return command, rest.strip()
-
-
-def _expand_skill_slash_command_for_agent(
-    msg: str,
-    *,
-    session_id: str | None,
-    hermes_home: str,
-    skills_dir: Path,
-) -> str:
-    """Expand a Hermes Agent /skill command using the active profile context."""
-    parsed = _split_skill_slash_command(msg)
-    if parsed is None:
-        return msg
-
-    command, user_instruction = parsed
-    snapshot = None
-    try:
-        _prewarm_skill_tool_modules()
-        try:
-            from api.profiles import snapshot_skill_home_modules
-
-            snapshot = snapshot_skill_home_modules()
-        except Exception:
-            snapshot = None
-        _patch_skill_tool_modules_for_agent(hermes_home, skills_dir)
-        from agent.skill_commands import (
-            build_skill_invocation_message,
-            resolve_skill_command_key,
-            scan_skill_commands,
-        )
-
-        commands = scan_skill_commands()
-        canonical_key = f"/{command.replace('_', '-')}"
-        cmd_key = canonical_key if canonical_key in commands else resolve_skill_command_key(command)
-        if cmd_key is None:
-            logger.warning(
-                "Skill slash command not found: command=%s hermes_home=%s skills_dir=%s",
-                command,
-                hermes_home,
-                skills_dir,
-            )
-            return msg
-
-        expanded = build_skill_invocation_message(
-            cmd_key,
-            user_instruction,
-            task_id=session_id,
-        )
-        if expanded:
-            logger.info(
-                "Expanded skill slash command: command=%s key=%s hermes_home=%s skills_dir=%s",
-                command,
-                cmd_key,
-                hermes_home,
-                skills_dir,
-            )
-            return expanded
-
-        logger.warning(
-            "Skill slash command matched but failed to expand: command=%s key=%s hermes_home=%s skills_dir=%s",
-            command,
-            cmd_key,
-            hermes_home,
-            skills_dir,
-        )
-    except Exception:
-        logger.exception(
-            "Failed to expand skill slash command: command=%s hermes_home=%s skills_dir=%s",
-            command,
-            hermes_home,
-            skills_dir,
-        )
-    finally:
-        if snapshot is not None:
-            try:
-                from api.profiles import restore_skill_home_modules
-
-                restore_skill_home_modules(snapshot)
-            except Exception:
-                logger.debug("Failed to restore skill module globals after slash expansion", exc_info=True)
-    return msg
-
-
 def _build_agent_thread_env(profile_runtime_env: dict | None, workspace: str, session_id: str, profile_home: str) -> dict:
     """Build thread-local agent env with per-run values overriding profile defaults.
 
@@ -572,6 +480,8 @@ def _build_agent_thread_env(profile_runtime_env: dict | None, workspace: str, se
         'TERMINAL_CWD': str(workspace),
         'HERMES_EXEC_ASK': '1',
         'HERMES_SESSION_KEY': session_id,
+        'HERMES_SESSION_ID': session_id,
+        'HERMES_SESSION_PLATFORM': 'webui',
         'HERMES_HOME': profile_home,
     })
     return env
@@ -2545,6 +2455,8 @@ def _run_agent_streaming(
             old_cwd = os.environ.get('TERMINAL_CWD')
             old_exec_ask = os.environ.get('HERMES_EXEC_ASK')
             old_session_key = os.environ.get('HERMES_SESSION_KEY')
+            old_session_id = os.environ.get('HERMES_SESSION_ID')
+            old_session_platform = os.environ.get('HERMES_SESSION_PLATFORM')
             old_hermes_home = os.environ.get('HERMES_HOME')
             if snapshot_skill_home_modules is not None:
                 skill_home_snapshot = snapshot_skill_home_modules()
@@ -2552,6 +2464,8 @@ def _run_agent_streaming(
             os.environ['TERMINAL_CWD'] = str(s.workspace)
             os.environ['HERMES_EXEC_ASK'] = '1'
             os.environ['HERMES_SESSION_KEY'] = session_id
+            os.environ['HERMES_SESSION_ID'] = session_id
+            os.environ['HERMES_SESSION_PLATFORM'] = 'webui'
             if _profile_home:
                 os.environ['HERMES_HOME'] = _profile_home
                 # Patch module-level caches to match the active profile.
@@ -2569,12 +2483,6 @@ def _run_agent_streaming(
                     sys.modules.get('tools.skill_manager_tool'),
                 )
                 _patch_skill_tool_modules_for_agent(_profile_home, _skills_dir, _skill_modules)
-                msg_text = _expand_skill_slash_command_for_agent(
-                    msg_text,
-                    session_id=session_id,
-                    hermes_home=_profile_home,
-                    skills_dir=_skills_dir,
-                )
             # ── MCP Server Discovery (inside env window) ──
             # MUST run while HERMES_HOME is set to the active profile.
             # `discover_mcp_tools()` reads `~/.hermes/config.yaml` via
@@ -4058,6 +3966,10 @@ def _run_agent_streaming(
                 else: os.environ['HERMES_EXEC_ASK'] = old_exec_ask
                 if old_session_key is None: os.environ.pop('HERMES_SESSION_KEY', None)
                 else: os.environ['HERMES_SESSION_KEY'] = old_session_key
+                if old_session_id is None: os.environ.pop('HERMES_SESSION_ID', None)
+                else: os.environ['HERMES_SESSION_ID'] = old_session_id
+                if old_session_platform is None: os.environ.pop('HERMES_SESSION_PLATFORM', None)
+                else: os.environ['HERMES_SESSION_PLATFORM'] = old_session_platform
                 if old_hermes_home is None: os.environ.pop('HERMES_HOME', None)
                 else: os.environ['HERMES_HOME'] = old_hermes_home
                 if skill_home_snapshot is not None and restore_skill_home_modules is not None:
