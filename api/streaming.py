@@ -431,15 +431,12 @@ def _extract_gateway_routing_metadata(agent, result, requested_model=None, reque
 
 
 def _resolve_skills_dir(profile_home: str) -> Path:
-    """Return the skills directory for the current agent run.
+    """Return the canonical WebUI skills directory for agent runs.
 
-    Runtime agent invocations should match Hermes Agent CLI semantics:
-    skills are loaded from the active Hermes profile home, plus any
-    ``skills.external_dirs`` configured there.  The WebUI shared skills
-    directory remains a management/browsing surface; it is not the agent
-    runtime's replacement for ``HERMES_HOME/skills``.
+    The WebUI intentionally ignores single-user, multi-user, and profile-scope
+    differences for skills: slash skills always come from ``~/.hermes/skills``.
     """
-    return Path(profile_home) / "skills"
+    return (Path("~").expanduser() / ".hermes" / "skills").resolve()
 
 
 def _patch_skill_tool_modules_for_agent(

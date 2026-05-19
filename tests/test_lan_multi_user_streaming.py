@@ -1,9 +1,8 @@
 """Tests for LAN multi-user streaming: skills dir resolution, env lock scope, MCP discovery placement.
 
 These are runtime-focused tests verifying:
-  1. _resolve_skills_dir() returns profile_home / "skills" in multi-user mode,
-     matching Hermes Agent CLI runtime semantics.
-  2. _resolve_skills_dir() returns profile_home / "skills" in legacy mode.
+  1. _resolve_skills_dir() returns ~/.hermes/skills in multi-user mode.
+  2. _resolve_skills_dir() returns ~/.hermes/skills in legacy mode.
   3. SKILLS_DIR patching inside _ENV_LOCK uses _resolve_skills_dir().
   4. MCP discovery runs inside the _ENV_LOCK window (source-level proof).
   5. _ENV_LOCK is NOT held during the agent run (source-level proof).
@@ -19,52 +18,54 @@ import pytest
 
 
 # ---------------------------------------------------------------------------
-# 1. _resolve_skills_dir — multi-user mode returns profile skills dir
+# 1. _resolve_skills_dir — multi-user mode returns global home skills dir
 # ---------------------------------------------------------------------------
 
 class TestResolveSkillsDirMultiUser:
-    """Even in multi-user mode, runtime slash skills come from the active
-    profile's Hermes Agent skills directory."""
+    """Even in multi-user mode, runtime slash skills come from ~/.hermes/skills."""
 
-    def test_returns_profile_skills_dir_in_multi_user_mode(self, tmp_path):
-        """is_multi_user_mode() == True still uses profile_home / "skills"."""
+    def test_returns_home_skills_dir_in_multi_user_mode(self, tmp_path, monkeypatch):
+        """is_multi_user_mode() == True still uses ~/.hermes/skills."""
         shared = tmp_path / "shared_skills"
         shared.mkdir()
         profile_home = tmp_path / "profile"
+        monkeypatch.setenv("HOME", str(tmp_path / "home"))
 
         with mock.patch("api.users.is_multi_user_mode", return_value=True), \
              mock.patch("api.users.get_shared_skills_dir", return_value=shared):
             from api.streaming import _resolve_skills_dir
             result = _resolve_skills_dir(str(profile_home))
 
-        assert result == profile_home / "skills"
+        assert result == tmp_path / "home" / ".hermes" / "skills"
 
-    def test_shared_dir_not_called_from_multi_user_runtime(self, tmp_path):
-        """The shared skills dir is for management UI, not agent runtime."""
+    def test_shared_dir_not_called_from_multi_user_runtime(self, tmp_path, monkeypatch):
+        """The shared skills dir is not used by runtime skills lookup."""
         shared = tmp_path / "enterprise_skills"
         shared.mkdir()
         profile_home = tmp_path / "some_profile"
+        monkeypatch.setenv("HOME", str(tmp_path / "home"))
 
         with mock.patch("api.users.is_multi_user_mode", return_value=True), \
              mock.patch("api.users.get_shared_skills_dir", return_value=shared) as mock_gssd:
             from api.streaming import _resolve_skills_dir
             result = _resolve_skills_dir(str(profile_home))
 
-        assert result == profile_home / "skills"
+        assert result == tmp_path / "home" / ".hermes" / "skills"
         mock_gssd.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
-# 2. _resolve_skills_dir — legacy/single-user mode returns profile_home/skills
+# 2. _resolve_skills_dir — legacy/single-user mode returns global home skills
 # ---------------------------------------------------------------------------
 
 class TestResolveSkillsDirLegacy:
     """When is_multi_user_mode() is False (or fails), _resolve_skills_dir
-    returns profile_home / 'skills'."""
+    returns ~/.hermes/skills."""
 
-    def test_returns_profile_skills_in_legacy_mode(self, tmp_path):
+    def test_returns_home_skills_in_legacy_mode(self, tmp_path, monkeypatch):
         profile_home = str(tmp_path / "my_profile")
-        expected = Path(profile_home) / "skills"
+        monkeypatch.setenv("HOME", str(tmp_path / "home"))
+        expected = tmp_path / "home" / ".hermes" / "skills"
 
         with mock.patch("api.users.is_multi_user_mode", return_value=False):
             from api.streaming import _resolve_skills_dir
@@ -72,10 +73,11 @@ class TestResolveSkillsDirLegacy:
 
         assert result == expected
 
-    def test_returns_profile_skills_when_import_fails(self, tmp_path):
-        """If api.users is unavailable, fall back to profile_home / 'skills'."""
+    def test_returns_home_skills_when_import_fails(self, tmp_path, monkeypatch):
+        """If api.users is unavailable, still use ~/.hermes/skills."""
         profile_home = str(tmp_path / "fallback_profile")
-        expected = Path(profile_home) / "skills"
+        monkeypatch.setenv("HOME", str(tmp_path / "home"))
+        expected = tmp_path / "home" / ".hermes" / "skills"
 
         with mock.patch("api.users.is_multi_user_mode", side_effect=ImportError("no module")):
             from api.streaming import _resolve_skills_dir
@@ -83,10 +85,11 @@ class TestResolveSkillsDirLegacy:
 
         assert result == expected
 
-    def test_returns_profile_skills_when_users_check_raises(self, tmp_path):
-        """If is_multi_user_mode() raises, fall back to profile_home / 'skills'."""
+    def test_returns_home_skills_when_users_check_raises(self, tmp_path, monkeypatch):
+        """If is_multi_user_mode() raises, still use ~/.hermes/skills."""
         profile_home = str(tmp_path / "error_profile")
-        expected = Path(profile_home) / "skills"
+        monkeypatch.setenv("HOME", str(tmp_path / "home"))
+        expected = tmp_path / "home" / ".hermes" / "skills"
 
         with mock.patch("api.users.is_multi_user_mode", side_effect=RuntimeError("db locked")):
             from api.streaming import _resolve_skills_dir
@@ -209,31 +212,33 @@ class TestEnvLockNotHeldDuringAgentRun:
 
 
 # ---------------------------------------------------------------------------
-# 6. _resolve_skills_dir ignores shared skills for runtime loading
+# 6. _resolve_skills_dir ignores mode/profile for runtime loading
 # ---------------------------------------------------------------------------
 
 class TestResolveSkillsDirIntegration:
-    """Integration test: _resolve_skills_dir stays CLI-compatible."""
+    """Integration test: _resolve_skills_dir always uses ~/.hermes/skills."""
 
-    def test_multi_user_returns_profile_skills(self, tmp_path):
-        """Multi-user runtime loading still uses profile_home / 'skills'."""
+    def test_multi_user_returns_home_skills(self, tmp_path, monkeypatch):
+        """Multi-user runtime loading uses ~/.hermes/skills."""
         fake_state_dir = tmp_path / "state"
         profile_home = tmp_path / "profile"
+        monkeypatch.setenv("HOME", str(tmp_path / "home"))
 
         with mock.patch("api.users.STATE_DIR", fake_state_dir), \
              mock.patch("api.users.is_multi_user_mode", return_value=True):
             from api.streaming import _resolve_skills_dir
             result = _resolve_skills_dir(str(profile_home))
 
-        assert result == profile_home / "skills"
+        assert result == tmp_path / "home" / ".hermes" / "skills"
 
-    def test_legacy_returns_profile_skills(self, tmp_path):
-        """In legacy mode, result is always profile_home / 'skills'."""
+    def test_legacy_returns_home_skills(self, tmp_path, monkeypatch):
+        """In legacy mode, result is always ~/.hermes/skills."""
         ph = str(tmp_path / "alice")
+        monkeypatch.setenv("HOME", str(tmp_path / "home"))
         with mock.patch("api.users.is_multi_user_mode", return_value=False):
             from api.streaming import _resolve_skills_dir
             result = _resolve_skills_dir(ph)
-        assert result == Path(ph) / "skills"
+        assert result == tmp_path / "home" / ".hermes" / "skills"
 
 
 # ---------------------------------------------------------------------------

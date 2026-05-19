@@ -87,7 +87,6 @@ from api.profiles import _profiles_match  # noqa: F401, E402  (re-export)
 from api.users import (
     create_api_token,
     create_user,
-    get_shared_skills_dir,
     is_workspace_allowed_for_user,
     is_multi_user_mode,
     list_tokens_for_user,
@@ -157,24 +156,13 @@ def _ensure_session_workspace_allowed(handler, session, *, write: bool = False):
 
 
 def _active_skills_dir() -> Path:
-    """Return the skills directory for the current mode.
+    """Return the canonical WebUI skills directory.
 
-    Multi-user mode: shared enterprise skills directory (get_shared_skills_dir).
-    Legacy/single-user/profile mode: profile-scoped skills directory under
-    the active Hermes home.
+    Skills are intentionally global to the server now: both single-user and
+    multi-user modes read and manage ``~/.hermes/skills`` instead of profile- or
+    shared-skill directories.
     """
-    try:
-        if is_multi_user_mode():
-            return get_shared_skills_dir()
-    except Exception:
-        pass
-    # Legacy/single-user/profile mode: use the active profile's skills dir
-    try:
-        from api.profiles import get_active_hermes_home
-        home = get_active_hermes_home()
-        return (home / "skills").resolve()
-    except Exception:
-        return (STATE_DIR / "shared_skills").resolve()
+    return (Path("~").expanduser() / ".hermes" / "skills").resolve()
 
 
 def _skill_path_within(base_dir: Path, candidate: Path) -> bool:
@@ -11078,7 +11066,7 @@ def _handle_skill_save(handler, body):
         skill_dir = skills_dir / category / skill_name
     else:
         skill_dir = skills_dir / skill_name
-    # Validate resolved path stays within the active profile skills dir.
+    # Validate resolved path stays within the canonical skills dir.
     try:
         skill_dir.resolve().relative_to(skills_dir.resolve())
     except ValueError:

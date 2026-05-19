@@ -10,17 +10,18 @@ import pytest
 pytest.importorskip("yaml")
 
 
-def test_runtime_skills_dir_matches_cli_profile_home_in_multi_user_mode(tmp_path, monkeypatch):
+def test_runtime_skills_dir_uses_global_home_skills_in_multi_user_mode(tmp_path, monkeypatch):
     from api.streaming import _resolve_skills_dir
 
     profile_home = tmp_path / "hermes-home"
     shared = tmp_path / "shared_skills"
     shared.mkdir()
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
 
     monkeypatch.setattr("api.users.is_multi_user_mode", lambda: True)
     monkeypatch.setattr("api.users.get_shared_skills_dir", lambda: shared)
 
-    assert _resolve_skills_dir(str(profile_home)) == profile_home / "skills"
+    assert _resolve_skills_dir(str(profile_home)) == tmp_path / "home" / ".hermes" / "skills"
 
 
 def test_agent_thread_env_marks_webui_session_and_profile_home(tmp_path):
@@ -44,11 +45,11 @@ def test_agent_thread_env_marks_webui_session_and_profile_home(tmp_path):
     assert env["CUSTOM_PROFILE_VALUE"] == "1"
 
 
-def test_skill_module_patch_uses_profile_home_skills_dir(tmp_path, monkeypatch):
+def test_skill_module_patch_uses_global_home_skills_dir(tmp_path, monkeypatch):
     from api.streaming import _patch_skill_tool_modules_for_agent
 
     profile_home = tmp_path / "hermes-home"
-    skills_dir = profile_home / "skills"
+    skills_dir = tmp_path / "home" / ".hermes" / "skills"
     skills_tool = SimpleNamespace()
     skill_manager_tool = SimpleNamespace()
 

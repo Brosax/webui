@@ -484,10 +484,12 @@ def test_read_only_workspace_keeps_name_unchanged():
 
 # ── Skills dir: legacy vs multi-user mode ─────────────────────────────────────
 
-def test_active_skills_dir_uses_shared_in_multi_user_mode():
-    """_active_skills_dir must use get_shared_skills_dir() in multi-user mode."""
+def test_active_skills_dir_uses_home_skills_in_multi_user_mode(monkeypatch, tmp_path):
+    """_active_skills_dir must use ~/.hermes/skills in multi-user mode."""
     from api.routes import _active_skills_dir
-    from api.users import get_shared_skills_dir, is_multi_user_mode
+    from api.users import is_multi_user_mode
+
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
 
     # This test only makes sense when multi-user mode is active
     # (i.e., at least one user exists in users.db)
@@ -501,8 +503,20 @@ def test_active_skills_dir_uses_shared_in_multi_user_mode():
         return
 
     skills_dir = _active_skills_dir()
-    expected = get_shared_skills_dir()
-    assert skills_dir == expected, f"In multi-user mode, _active_skills_dir() should use get_shared_skills_dir(): expected {expected}, got {skills_dir}"
+    expected = tmp_path / "home" / ".hermes" / "skills"
+    assert skills_dir == expected, f"_active_skills_dir() should use ~/.hermes/skills: expected {expected}, got {skills_dir}"
+
+
+def test_active_skills_dir_uses_home_skills_in_single_user_mode(monkeypatch, tmp_path):
+    """_active_skills_dir must use ~/.hermes/skills in single-user mode."""
+    from api.routes import _active_skills_dir
+
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setattr("api.routes.is_multi_user_mode", lambda: False)
+
+    skills_dir = _active_skills_dir()
+    expected = tmp_path / "home" / ".hermes" / "skills"
+    assert skills_dir == expected
 
 
 # ── Workspaces endpoint: name/mode metadata ───────────────────────────────────
