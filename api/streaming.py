@@ -444,6 +444,14 @@ def _patch_skill_tool_modules_for_agent(
     modules: tuple[object | None, object | None] | None = None,
 ) -> None:
     """Patch Hermes Agent skill module globals for this agent run."""
+    try:
+        from api.profiles import patch_skill_home_modules
+
+        patch_skill_home_modules(Path(profile_home), skills_dir)
+        return
+    except Exception:
+        pass
+
     _ph = Path(profile_home)
     if modules is None:
         modules = (
@@ -484,8 +492,15 @@ def _expand_skill_slash_command_for_agent(
         return msg
 
     command, user_instruction = parsed
+    snapshot = None
     try:
         _prewarm_skill_tool_modules()
+        try:
+            from api.profiles import snapshot_skill_home_modules
+
+            snapshot = snapshot_skill_home_modules()
+        except Exception:
+            snapshot = None
         _patch_skill_tool_modules_for_agent(hermes_home, skills_dir)
         from agent.skill_commands import (
             build_skill_invocation_message,
@@ -534,6 +549,14 @@ def _expand_skill_slash_command_for_agent(
             hermes_home,
             skills_dir,
         )
+    finally:
+        if snapshot is not None:
+            try:
+                from api.profiles import restore_skill_home_modules
+
+                restore_skill_home_modules(snapshot)
+            except Exception:
+                logger.debug("Failed to restore skill module globals after slash expansion", exc_info=True)
     return msg
 
 
@@ -2507,6 +2530,12 @@ def _run_agent_streaming(
         # first-time module initialisation (which can be slow) does not
         # block other concurrent sessions waiting on _ENV_LOCK (#2024).
         _prewarm_skill_tool_modules()
+        try:
+            from api.profiles import restore_skill_home_modules, snapshot_skill_home_modules
+        except Exception:
+            restore_skill_home_modules = None
+            snapshot_skill_home_modules = None
+        skill_home_snapshot = None
         # Still set process-level env as fallback for tools that bypass thread-local
         # Acquire lock only for the env mutation, then release before the agent runs.
         # The finally block re-acquires to restore — keeping critical sections short
@@ -2517,6 +2546,8 @@ def _run_agent_streaming(
             old_exec_ask = os.environ.get('HERMES_EXEC_ASK')
             old_session_key = os.environ.get('HERMES_SESSION_KEY')
             old_hermes_home = os.environ.get('HERMES_HOME')
+            if snapshot_skill_home_modules is not None:
+                skill_home_snapshot = snapshot_skill_home_modules()
             os.environ.update(_profile_runtime_env)
             os.environ['TERMINAL_CWD'] = str(s.workspace)
             os.environ['HERMES_EXEC_ASK'] = '1'
@@ -4029,6 +4060,8 @@ def _run_agent_streaming(
                 else: os.environ['HERMES_SESSION_KEY'] = old_session_key
                 if old_hermes_home is None: os.environ.pop('HERMES_HOME', None)
                 else: os.environ['HERMES_HOME'] = old_hermes_home
+                if skill_home_snapshot is not None and restore_skill_home_modules is not None:
+                    restore_skill_home_modules(skill_home_snapshot)
 
     except Exception as e:
         print('[webui] stream error:\n' + traceback.format_exc(), flush=True)
