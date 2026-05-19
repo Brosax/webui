@@ -7335,7 +7335,7 @@ async function saveWorkspaceDisplayNameFromSettings(path,name,row,editPanel){
     renderWorkspacesPanel(_workspaceList);
     if(typeof syncWorkspaceDisplays==='function') syncWorkspaceDisplays();
     if(typeof syncTitlebarWorkspace==='function'){
-      const active=(S&&S._profileDefaultWorkspace)||'';
+      const active=(S&&S.session&&S.session.workspace)||((S&&S._profileDefaultWorkspace)||'');
       syncTitlebarWorkspace(active);
     }
     showToast(t('workspace_renamed') || 'Workspace renamed');

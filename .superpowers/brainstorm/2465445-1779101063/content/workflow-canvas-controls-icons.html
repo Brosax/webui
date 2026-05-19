@@ -1,0 +1,46 @@
+<h2>Workflow Canvas Controls</h2>
+<p class="subtitle">Choose the control density for the bottom-left canvas toolbar.</p>
+
+<div class="split">
+  <div class="mockup card" data-choice="icon-only" onclick="toggleSelect(this)">
+    <div class="mockup-header">A. Icon-only compact controls</div>
+    <div class="mockup-body">
+      <div style="height:280px;position:relative;background:#151515;border:1px solid #333;overflow:hidden">
+        <div style="position:absolute;left:80px;top:70px;width:180px;height:70px;border:1px solid #555;background:#202020;color:#ddd;padding:12px">Manual Trigger</div>
+        <div style="position:absolute;left:330px;top:150px;width:180px;height:70px;border:1px solid #555;background:#202020;color:#ddd;padding:12px">Agent Run</div>
+        <div style="position:absolute;left:12px;bottom:12px;display:flex;gap:4px;padding:4px;border:1px solid #444;background:#111">
+          <button title="Zoom In" style="width:32px;height:32px">+</button>
+          <button title="Zoom Out" style="width:32px;height:32px">−</button>
+          <button title="Fit View" style="width:32px;height:32px">□</button>
+          <button title="Reset 100%" style="width:32px;height:32px">1:1</button>
+          <button title="Lock Nodes" style="width:32px;height:32px">🔒</button>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>Recommended</h3>
+      <p>Smallest footprint. Each icon button has title and aria-label; lock shows active state.</p>
+    </div>
+  </div>
+
+  <div class="mockup card" data-choice="icons-plus-short-label" onclick="toggleSelect(this)">
+    <div class="mockup-header">B. Icons with short labels</div>
+    <div class="mockup-body">
+      <div style="height:280px;position:relative;background:#151515;border:1px solid #333;overflow:hidden">
+        <div style="position:absolute;left:80px;top:70px;width:180px;height:70px;border:1px solid #555;background:#202020;color:#ddd;padding:12px">Manual Trigger</div>
+        <div style="position:absolute;left:330px;top:150px;width:180px;height:70px;border:1px solid #555;background:#202020;color:#ddd;padding:12px">Agent Run</div>
+        <div style="position:absolute;left:12px;bottom:12px;display:flex;gap:4px;padding:4px;border:1px solid #444;background:#111">
+          <button style="height:32px">+ Zoom</button>
+          <button style="height:32px">− Zoom</button>
+          <button style="height:32px">□ Fit</button>
+          <button style="height:32px">1:1</button>
+          <button style="height:32px">🔒 Lock</button>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>More discoverable</h3>
+      <p>Easier to read, but wider and more likely to compete with the canvas on small screens.</p>
+    </div>
+  </div>
+</div>

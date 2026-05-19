@@ -65,6 +65,22 @@
         { key: "instruction", label: "Instruction", type: "code", default: "" },
       ],
     },
+    "human.review": {
+      type: "human.review",
+      label: "Human Review",
+      category: "Control",
+      accent: "#f2c94c",
+      inputs: [{ id: "in", label: "Input", type: "any" }],
+      outputs: [
+        { id: "approved", label: "Approved", type: "flow" },
+        { id: "request_changes", label: "Request Changes", type: "flow" },
+        { id: "rejected", label: "Rejected", type: "flow" },
+      ],
+      parameters: [
+        { key: "title", label: "Title", type: "string", default: "Review required" },
+        { key: "instructions", label: "Instructions", type: "code", default: "Review output and choose approve or reject." },
+      ],
+    },
     "file.input": {
       type: "file.input",
       label: "File Input",

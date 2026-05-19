@@ -176,3 +176,64 @@ def test_simulated_canvas_cancel_skips_unstarted_nodes():
     )
     statuses = [node["status"] for node in list_run_nodes(run["run_id"])]
     assert "skipped" in statuses
+
+
+def test_simulated_canvas_human_review_pauses_without_decision():
+    from api.workflow_trace import get_run, list_run_nodes, run_canvas_workflow
+
+    nodes = [
+        {"id": "trigger_1", "type": "trigger.manual", "name": "Trigger", "parameters": {}},
+        {"id": "agent_1", "type": "agent.run", "name": "Agent", "parameters": {"instruction": "draft"}},
+        {"id": "review_1", "type": "human.review", "name": "Review", "parameters": {"title": "Manager review"}},
+        {"id": "output_1", "type": "output.results_display", "name": "Output", "parameters": {}},
+    ]
+    edges = [
+        {"source": "trigger_1", "target": "agent_1"},
+        {"source": "agent_1", "target": "review_1"},
+        {"source": "review_1", "target": "output_1"},
+    ]
+
+    run = run_canvas_workflow(
+        actor="alice",
+        inputs={"_simulate_delay_ms": 0},
+        inline_nodes=nodes,
+        inline_edges=edges,
+        is_test_run=True,
+    )
+
+    _wait_for_status(run["run_id"], lambda: (get_run(run["run_id"]) or {}).get("status") == "pending_approval")
+    latest = get_run(run["run_id"])
+    assert latest is not None
+    assert latest["status"] == "pending_approval"
+    assert latest.get("metadata", {}).get("pending_step_id") == "review_1"
+    statuses = [node["status"] for node in list_run_nodes(run["run_id"])]
+    assert statuses == ["completed", "completed", "pending", "pending"]
+
+
+def test_simulated_canvas_human_review_completes_when_approved():
+    from api.workflow_trace import list_run_nodes, run_canvas_workflow
+
+    nodes = [
+        {"id": "trigger_1", "type": "trigger.manual", "name": "Trigger", "parameters": {}},
+        {"id": "agent_1", "type": "agent.run", "name": "Agent", "parameters": {"instruction": "draft"}},
+        {"id": "review_1", "type": "human.review", "name": "Review", "parameters": {"title": "Manager review"}},
+        {"id": "output_1", "type": "output.results_display", "name": "Output", "parameters": {"template": "{{steps.agent_1.output.message}}"}},
+    ]
+    edges = [
+        {"source": "trigger_1", "target": "agent_1"},
+        {"source": "agent_1", "target": "review_1"},
+        {"source": "review_1", "target": "output_1"},
+    ]
+
+    run = run_canvas_workflow(
+        actor="alice",
+        inputs={"_simulate_delay_ms": 0, "_approvals": {"review_1": {"approved": True, "message": "looks good"}}},
+        inline_nodes=nodes,
+        inline_edges=edges,
+        is_test_run=True,
+    )
+    finished = _wait_for_terminal(run["run_id"])
+
+    assert finished["status"] == "completed"
+    statuses = [node["status"] for node in list_run_nodes(run["run_id"])]
+    assert statuses == ["completed", "completed", "completed", "completed"]

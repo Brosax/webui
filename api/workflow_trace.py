@@ -2114,6 +2114,7 @@ def _canvas_delay_seconds(node_type: str, inputs: dict) -> float:
         "file.input": 0.7,
         "file.operations": 0.7,
         "agent.run": 1.2,
+        "human.review": 0.4,
         "output.results_display": 0.5,
         "file.output": 0.5,
     }
@@ -2248,6 +2249,44 @@ def _execute_canvas_node(run_id: str, node_record: dict, context: dict, actor: s
             "artifacts": [],
         }
 
+    if node_type in {"human.review", "approval"}:
+        review_title = str(config.get("title") or node_record["canvas_node_name"] or "Human review")
+        decision = _extract_approval_decision(context.get("inputs", {}), canvas_id)
+        if not decision:
+            append_event(
+                run_id,
+                "approval_request",
+                actor=actor,
+                node_id=node_id,
+                payload={"pattern_keys": [canvas_id], "status": "pending", "title": review_title},
+            )
+            return {"state": "pending_approval", "output": None, "summary": f"Awaiting review: {review_title}", "artifacts": []}
+
+        approved = bool(decision.get("approved"))
+        message = str(decision.get("message") or "")
+        status = "approved" if approved else "denied"
+        append_approval_event(
+            run_id=run_id,
+            node_id=node_id,
+            actor=actor,
+            pattern_keys=[canvas_id],
+            payload={"status": status, "approved": approved, "message": message, "title": review_title},
+        )
+        if not approved:
+            return {
+                "state": "denied",
+                "output": {"approved": False, "message": message},
+                "summary": message or f"Review denied: {review_title}",
+                "artifacts": [],
+                "error": message or "Approval denied",
+            }
+        return {
+            "state": "completed",
+            "output": {"approved": True, "message": message, "title": review_title},
+            "summary": message or f"Review approved: {review_title}",
+            "artifacts": [],
+        }
+
     if node_type in {"output.results_display", "file.output"}:
         destination = str(config.get("destination") or ("artifact" if node_type == "file.output" else "screen")).lower()
         template = config.get("template")
@@ -2311,6 +2350,48 @@ def _run_canvas_worker(run_id: str, node_records: list[dict], actor: str, inputs
                 return
 
             result = _execute_canvas_node(run_id, record, context, actor)
+            if result.get("state") == "pending_approval":
+                update_node(
+                    record["node_id"],
+                    status="pending",
+                    summary=result.get("summary") or "Awaiting approval",
+                )
+                update_run(
+                    run_id,
+                    status="pending_approval",
+                    metadata=_merge_run_metadata(get_run(run_id) or {}, {
+                        "pending_approval": True,
+                        "pending_step_id": record["canvas_node_id"],
+                        "step_outputs": context["steps"],
+                    }),
+                )
+                return
+            if result.get("state") == "denied":
+                message = str(result.get("error") or "Approval denied")
+                update_node(
+                    record["node_id"],
+                    status="failed",
+                    ended_at=datetime.now(timezone.utc).isoformat(),
+                    structured_result=result.get("output"),
+                    summary=result.get("summary") or message,
+                    error=message,
+                )
+                append_event(
+                    run_id,
+                    "node_error",
+                    actor=actor,
+                    node_id=record["node_id"],
+                    payload={"message": message, "canvas_node_id": record["canvas_node_id"]},
+                )
+                _mark_canvas_remaining_skipped(node_records, index + 1, actor, "Skipped after approval denial")
+                update_run(
+                    run_id,
+                    status="failed",
+                    ended_at=datetime.now(timezone.utc).isoformat(),
+                    error=message,
+                    metadata=_merge_run_metadata(get_run(run_id) or {}, {"step_outputs": context.get("steps", {})}),
+                )
+                return
             output = result.get("output")
             context["last_output"] = output
             context["steps"][record["canvas_node_id"]] = {
@@ -2339,7 +2420,7 @@ def _run_canvas_worker(run_id: str, node_records: list[dict], actor: str, inputs
             run_id,
             status="completed",
             ended_at=datetime.now(timezone.utc).isoformat(),
-            metadata=_merge_run_metadata(get_run(run_id) or {}, {"step_outputs": context["steps"]}),
+            metadata=_merge_run_metadata(get_run(run_id) or {}, {"step_outputs": context["steps"], "pending_approval": False}),
         )
     except Exception as exc:
         message = str(exc) or "Workflow execution failed"

@@ -33,3 +33,13 @@ def test_settings_spaces_workspace_row_css_exists():
         ".settings-ws-row-edit{",
     ):
         assert token in css
+
+
+def test_settings_spaces_save_refreshes_current_workspace_titlebar():
+    src = pathlib.Path("static/panels.js").read_text(encoding="utf-8")
+    start = src.index("async function saveWorkspaceDisplayNameFromSettings")
+    end = src.index("function showWorkspaceFormForSettings", start)
+    body = src[start:end]
+    assert "S.session.workspace" in body
+    assert "syncTitlebarWorkspace(active)" in body
+    assert "S.session.workspace)||((S&&S._profileDefaultWorkspace" in body

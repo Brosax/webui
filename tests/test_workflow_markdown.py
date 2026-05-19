@@ -202,6 +202,25 @@ def test_extended_editor_schema_round_trip_and_port_validation():
         validate_workflow_document(bad_type)
 
 
+def test_human_review_branch_handle_is_supported():
+    from api.workflow_markdown import validate_workflow_document
+
+    doc = {
+        "schema_version": 1,
+        "name": "Review flow",
+        "nodes": [
+            {"id": "manual", "type": "trigger.manual", "name": "Manual"},
+            {"id": "review", "type": "human.review", "name": "Review"},
+            {"id": "out", "type": "output.results_display", "name": "Results"},
+        ],
+        "edges": [
+            {"source": "manual", "target": "review", "sourceHandle": "out", "targetHandle": "in"},
+            {"source": "review", "target": "out", "sourceHandle": "approved", "targetHandle": "in"},
+        ],
+    }
+    validate_workflow_document(doc)
+
+
 def test_dag_run_skips_disabled_nodes_and_records_not_implemented(tmp_path):
     from api.workflow_markdown import import_markdown_workflow, render_workflow_markdown
     from api.workflow_trace import list_run_nodes, run_workflow_definition

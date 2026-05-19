@@ -1393,7 +1393,12 @@ function applyBotName(){
     // and workspace actions (New file/folder) work before the first session (#804).
     if(s.default_workspace) S._profileDefaultWorkspace=s.default_workspace;
     window._sessionJumpButtonsEnabled=!!s.session_jump_buttons;
-    const appearance=_normalizeAppearance(s.theme,s.skin);
+    const serverAppearance=_normalizeAppearance(s.theme,s.skin);
+    const localTheme=s.multi_user_mode&&localStorage.getItem('hermes-theme');
+    const localSkin=s.multi_user_mode&&localStorage.getItem('hermes-skin');
+    // Non-admin users cannot always save global settings, so keep their
+    // browser-local appearance across reloads in multi-user mode.
+    const appearance=localTheme?_normalizeAppearance(localTheme,localSkin):serverAppearance;
     localStorage.setItem('hermes-theme',appearance.theme);
     _applyTheme(appearance.theme);
     localStorage.setItem('hermes-skin',appearance.skin);

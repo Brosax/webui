@@ -23,6 +23,16 @@ let _workflowActionMenu = null;
 let _workflowActionAnchor = null;
 let _workflowActionWorkflowId = null;
 let _workflowRenamingId = null;
+let _workflowExecutionPollTimer = null;
+let _workflowExecutionState = {
+  runId: null,
+  status: 'idle',
+  summary: '',
+  run: null,
+  nodes: [],
+};
+window._workflowExecutionState = _workflowExecutionState;
+window._workflowRuns = _workflowRuns;
 
 const WORKFLOW_ICONS = {
   more: '<svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" stroke="none"><circle cx="8" cy="3" r="1.25"/><circle cx="8" cy="8" r="1.25"/><circle cx="8" cy="13" r="1.25"/></svg>',
@@ -44,8 +54,10 @@ async function loadWorkflowTasks() {
     if (refreshBtn) { refreshBtn.style.opacity = '0.5'; refreshBtn.disabled = true; }
     _workflowLegacyMode = false;
     _stopWorkflowTracePolling();
+    _stopWorkflowExecutionPolling();
     const res = await api('/api/workflow/definitions');
     _workflowDefinitions = (res && res.data) ? res.data : [];
+    window._workflowRuns = _workflowRuns;
     _workflowMode = 'list';
     _workflowTab = 'canvas';
     _workflowRunDetail = null;
@@ -58,6 +70,7 @@ async function loadWorkflowTasks() {
         const fallback = await api('/api/workflow/runs');
         _workflowLegacyMode = true;
         _workflowLegacyRuns = (fallback && fallback.data) ? fallback.data : [];
+        window._workflowRuns = _workflowRuns;
         _workflowMode = 'list';
         _workflowRunDetail = null;
         _currentTrace = null;
@@ -168,6 +181,7 @@ function _setWorkflowHeaderButtons(mode) {
 
 function closeTraceDetail() {
   _stopWorkflowTracePolling();
+  _stopWorkflowExecutionPolling();
   if (_workflowMode === 'trace' || _workflowMode === 'run_detail') {
     if (_workflowCurrentDef) {
       _workflowMode = 'definition';
@@ -486,6 +500,7 @@ function _openWorkflowActionMenu(definition, anchorEl) {
 
 async function openWorkflowDefinition(workflowId) {
   try {
+    _stopWorkflowExecutionPolling();
     const [defRes, runsRes, versionsRes, sourceRes] = await Promise.all([
       api(`/api/workflow/definitions/${workflowId}`),
       api(`/api/workflow/definitions/${workflowId}/runs`),
@@ -494,6 +509,7 @@ async function openWorkflowDefinition(workflowId) {
     ]);
     _workflowCurrentDef = defRes.data || null;
     _workflowRuns = runsRes.data || [];
+    window._workflowRuns = _workflowRuns;
     _workflowVersions = versionsRes.data || [];
     _workflowSource = sourceRes.data?.source || null;
     _workflowSourceChecksum = sourceRes.data?.checksum || null;
@@ -828,12 +844,83 @@ async function runWorkflowDefinition(isTestRun) {
     const run = res.data;
     showToast(isTestRun ? 'Test run started' : 'Run started');
     if (run && run.run_id) {
-      await openWorkflowDefinition(_workflowCurrentDef.workflow_id);
-      openTraceView(run.run_id);
+      await _refreshWorkflowRunsForCurrentDefinition();
+      _setWorkflowExecutionState({
+        runId: run.run_id,
+        status: run.status || 'running',
+        summary: isTestRun ? 'Test run started' : 'Run started',
+        run,
+        nodes: [],
+      });
+      _startWorkflowExecutionPolling(run.run_id);
     }
   } catch (e) {
     showToast('Failed to start run: ' + e.message);
   }
+}
+
+function _setWorkflowExecutionState(nextState) {
+  _workflowExecutionState = Object.assign({
+    runId: null,
+    status: 'idle',
+    summary: '',
+    run: null,
+    nodes: [],
+  }, nextState || {});
+  window._workflowExecutionState = _workflowExecutionState;
+  if (typeof window.renderWorkflowResultsDrawer === 'function') window.renderWorkflowResultsDrawer();
+}
+
+function _stopWorkflowExecutionPolling() {
+  if (_workflowExecutionPollTimer) {
+    clearInterval(_workflowExecutionPollTimer);
+    _workflowExecutionPollTimer = null;
+  }
+}
+
+async function _refreshWorkflowRunsForCurrentDefinition() {
+  if (!_workflowCurrentDef?.workflow_id) return;
+  try {
+    const runsRes = await api(`/api/workflow/definitions/${_workflowCurrentDef.workflow_id}/runs`);
+    _workflowRuns = runsRes.data || [];
+    window._workflowRuns = _workflowRuns;
+  } catch (_) {
+    // Keep prior run list if refresh fails.
+  }
+}
+
+function _startWorkflowExecutionPolling(runId) {
+  _stopWorkflowExecutionPolling();
+  const pollOnce = async() => {
+    try {
+      const res = await api(`/api/workflow/runs/${runId}/trace`);
+      const trace = res.data || {};
+      const run = trace.run || null;
+      const nodes = trace.nodes || [];
+      _setWorkflowExecutionState({
+        runId,
+        status: run?.status || 'running',
+        summary: run?.error || '',
+        run,
+        nodes,
+      });
+      if (!run || !['running', 'pending_approval'].includes(run.status)) {
+        _stopWorkflowExecutionPolling();
+        _refreshWorkflowRunsForCurrentDefinition();
+      }
+    } catch (err) {
+      _setWorkflowExecutionState({
+        runId,
+        status: 'error',
+        summary: err?.message || 'Failed to fetch run status',
+        run: null,
+        nodes: [],
+      });
+      _stopWorkflowExecutionPolling();
+    }
+  };
+  pollOnce();
+  _workflowExecutionPollTimer = setInterval(pollOnce, 900);
 }
 
 function openWorkflowCreate() {

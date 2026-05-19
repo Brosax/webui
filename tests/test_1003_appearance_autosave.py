@@ -109,6 +109,18 @@ def test_full_save_settings_still_includes_font_size():
     assert "body.font_size=fontSize;" in compact
 
 
+def test_multi_user_boot_preserves_local_appearance_before_global_settings():
+    """Multi-user users may not be allowed to persist global settings.
+
+    Their browser-local appearance choice must survive reload/restart instead of
+    being overwritten by the admin-owned global /api/settings theme.
+    """
+    assert "s.multi_user_mode" in BOOT_JS
+    assert "localStorage.getItem('hermes-theme')" in BOOT_JS
+    assert "localStorage.getItem('hermes-skin')" in BOOT_JS
+    assert "s.multi_user_mode&&localStorage.getItem('hermes-theme')" in BOOT_JS.replace(" ", "")
+
+
 def test_settings_api_accepts_appearance_only_payload_without_overwriting_other_fields():
     original, status = _get("/api/settings")
     assert status == 200

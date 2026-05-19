@@ -33,9 +33,22 @@ _SUPPORTED_TYPES = {
     "output.results_display",
     "file.operations",
     "utility.http_request",
+    "human.review",
 }
 _SUPPORTED_IO_TYPES = {"text", "json", "file"}
-_SOURCE_HANDLES = {"out", "true", "false", "_branch", "_route", "route0", "route1", "route2"}
+_SOURCE_HANDLES = {
+    "out",
+    "true",
+    "false",
+    "_branch",
+    "_route",
+    "route0",
+    "route1",
+    "route2",
+    "approved",
+    "request_changes",
+    "rejected",
+}
 _TARGET_HANDLES = {"in"}
 
 

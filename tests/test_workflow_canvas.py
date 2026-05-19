@@ -65,6 +65,15 @@ def test_canvas_run_inline_nodes(tmp_path):
     assert run["status"] in ("completed", "running")
 
 
+def test_canvas_node_text_uses_width_based_truncation():
+    """Long node labels should be summarized by width, not fixed character count."""
+    src = pathlib.Path("static/workflow-canvas.js").read_text(encoding="utf-8")
+    assert "_workflowNodeSummary" in src
+    assert "_setSvgNodeText" in src
+    assert 'slice(0, 58)' not in src
+    assert 'setAttribute("title", normalized)' in src
+
+
 # ---------------------------------------------------------------------------
 # Route-level integration tests (require live test server on port 8788)
 # ---------------------------------------------------------------------------

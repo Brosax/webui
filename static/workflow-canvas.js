@@ -16,14 +16,19 @@ let _canvasContextPosition = null;
 let _canvasSuppressNodeClickUntil = 0;
 let _canvasView = { zoom: 1, scroll: { x: 0, y: 0 }, selectedNodeIds: [] };
 let _workflowPathPicker = null;
+let _workflowConsoleExpanded = new Set();
+let _workflowDrawerHeight = 196;
+let _workflowDrawerResizing = null;
 
 const WORKFLOW_NODE_WIDTH = 220;
 const WORKFLOW_NODE_HEIGHT = 84;
+const WORKFLOW_NODE_TITLE_MAX_WIDTH = WORKFLOW_NODE_WIDTH - 62;
 const WORKFLOW_CANVAS_MIN_ZOOM = 0.35;
 const WORKFLOW_CANVAS_MAX_ZOOM = 2;
 const WORKFLOW_CANVAS_ZOOM_IN_STEP = 1.08;
 const WORKFLOW_CANVAS_ZOOM_OUT_STEP = 0.92;
 const WORKFLOW_CANVAS_FIT_PADDING = 56;
+let _workflowNodeTextMeasureCanvas = null;
 
 function _registryNode(type) {
   return window.WorkflowNodeRegistry?.get(type) || { type, label: type || "Node", accent: "var(--accent)", inputs: [{ id: "in", label: "Input" }], outputs: [{ id: "out", label: "Output" }], parameters: [] };
@@ -239,15 +244,8 @@ function renderNode(node, parent) {
   title.setAttribute("x", "45");
   title.setAttribute("y", "31");
   title.setAttribute("class", "workflow-node-title");
-  title.textContent = node.name || def.label || node.type;
+  _setSvgNodeText(title, node.name || def.label || node.type, WORKFLOW_NODE_TITLE_MAX_WIDTH, "11px", "800");
   g.appendChild(title);
-
-  const type = document.createElementNS("http://www.w3.org/2000/svg", "text");
-  type.setAttribute("x", "14");
-  type.setAttribute("y", "59");
-  type.setAttribute("class", "workflow-node-type");
-  type.textContent = _nodeDescription(node, def);
-  g.appendChild(type);
 
   (def.inputs || []).forEach((port, index) => renderPort(g, node, port, "in", index, def.inputs.length));
   (def.outputs || []).forEach((port, index) => renderPort(g, node, port, "out", index, def.outputs.length));
@@ -303,13 +301,51 @@ function _nodeGlyph(type) {
   return "N";
 }
 
-function _nodeDescription(node, def) {
-  const params = node.parameters || {};
-  if (params.instruction) return String(params.instruction).slice(0, 58);
-  if (params.notes) return String(params.notes).slice(0, 58);
-  if (params.url) return String(params.url).slice(0, 58);
-  if (params.key) return `${params.key}: ${params.value || ""}`.slice(0, 58);
-  return def.label || node.type;
+function _normalizeWorkflowNodeText(text) {
+  return String(text == null ? "" : text).replace(/\s+/g, " ").trim();
+}
+
+function _workflowNodeTextWidth(text, fontSize = "10px", fontWeight = "400") {
+  const content = _normalizeWorkflowNodeText(text);
+  if (!content) return 0;
+  if (!_workflowNodeTextMeasureCanvas && typeof document !== "undefined") {
+    _workflowNodeTextMeasureCanvas = document.createElement("canvas");
+  }
+  const ctx = _workflowNodeTextMeasureCanvas?.getContext?.("2d");
+  if (!ctx) return content.length * 7;
+  ctx.font = `${fontWeight} ${fontSize} ui-sans-serif, system-ui, sans-serif`;
+  return ctx.measureText(content).width;
+}
+
+function _workflowNodeSummary(text, maxWidth, fontSize = "10px", fontWeight = "400") {
+  const content = _normalizeWorkflowNodeText(text);
+  if (!content) return "";
+  if (_workflowNodeTextWidth(content, fontSize, fontWeight) <= maxWidth) return content;
+  const ellipsis = "…";
+  let low = 0;
+  let high = content.length;
+  while (low < high) {
+    const mid = Math.ceil((low + high) / 2);
+    const candidate = `${content.slice(0, mid).trimEnd()}${ellipsis}`;
+    if (_workflowNodeTextWidth(candidate, fontSize, fontWeight) <= maxWidth) low = mid;
+    else high = mid - 1;
+  }
+  const trimmed = content.slice(0, Math.max(0, low)).trimEnd();
+  return trimmed ? `${trimmed}${ellipsis}` : ellipsis;
+}
+
+function _setSvgNodeText(textEl, fullText, maxWidth, fontSize = "10px", fontWeight = "400") {
+  const summary = _workflowNodeSummary(fullText, maxWidth, fontSize, fontWeight);
+  textEl.textContent = summary;
+  const normalized = _normalizeWorkflowNodeText(fullText);
+  if (normalized && normalized !== summary) {
+    textEl.setAttribute("title", normalized);
+    const title = document.createElementNS("http://www.w3.org/2000/svg", "title");
+    title.textContent = normalized;
+    textEl.appendChild(title);
+  } else {
+    textEl.removeAttribute("title");
+  }
 }
 
 function _edgeKey(edge) {
@@ -1415,22 +1451,115 @@ function renderMiniMap() {
 function renderWorkflowResultsDrawer() {
   const drawer = document.getElementById("workflow-results-drawer");
   if (!drawer) return;
+  drawer.style.height = `${Math.max(140, Math.min(460, _workflowDrawerHeight))}px`;
+  const execution = window._workflowExecutionState || null;
   const runs = Array.isArray(window._workflowRuns) ? window._workflowRuns : [];
-  const latest = runs[0];
-  const status = latest?.status || (_canvasNodes.length ? "ready" : "idle");
-  const rows = _canvasNodes.slice(0, 6).map((node, index) => {
-    const def = _registryNode(node.type);
+  const latest = execution?.run || runs[0];
+  const status = execution?.status || latest?.status || (_canvasNodes.length ? "ready" : "idle");
+  const nodeRows = Array.isArray(execution?.nodes) && execution.nodes.length
+    ? execution.nodes
+    : _canvasNodes.slice(0, 6).map((node) => ({ name: node.id, status: "ready", summary: _registryNode(node.type).label || node.type }));
+  const rows = nodeRows.slice(0, 16).map((node, index) => {
     const stamp = String(index + 1).padStart(2, "0");
-    return `<div class="workflow-console-row"><span>${stamp}</span><strong>${escapeHtml(node.id)}</strong><em>${escapeHtml(def.label || node.type)} ready.</em></div>`;
+    const name = node?.name || node?.node_id || node?.id || `node_${index + 1}`;
+    const rowKey = String(node?.node_id || node?.id || name);
+    const nodeStatus = node?.status || "ready";
+    const summary = node?.summary || (nodeStatus === "ready" ? "Ready." : "Running.");
+    const detailPayload = _workflowNodeDetailPayload(node);
+    const hasDetail = detailPayload !== "";
+    const expanded = hasDetail && _workflowConsoleExpanded.has(rowKey);
+    return `
+      <div class="workflow-console-row-wrap${expanded ? " expanded" : ""}" data-row-key="${escapeHtml(rowKey)}">
+        <div class="workflow-console-row">
+          <span>${stamp}</span>
+          <strong>${escapeHtml(name)}</strong>
+          <em>${escapeHtml(nodeStatus)}: ${escapeHtml(summary)}</em>
+          ${hasDetail ? `<button type="button" class="workflow-console-expand" data-workflow-console-expand="${escapeHtml(rowKey)}">${expanded ? "Hide details" : "Show details"}</button>` : ""}
+        </div>
+        ${hasDetail && expanded ? `<pre class="workflow-console-detail">${escapeHtml(detailPayload)}</pre>` : ""}
+      </div>
+    `;
   }).join("");
+  const summaryText = execution?.summary
+    || (latest?.error ? String(latest.error) : "")
+    || (execution?.runId ? `Run ${execution.runId}` : "Execution console");
   drawer.innerHTML = `
+    <div class="workflow-results-resizer" title="Resize execution results" aria-label="Resize execution results"></div>
     <div class="workflow-console-head">
       <div><button class="active">Execution Results</button><button>Stats (alpha)</button></div>
-      <div><span>${escapeHtml(status)}</span><span>Clear</span><span>Copy</span></div>
+      <div>
+        <span>${escapeHtml(status)}</span>
+        <span>${escapeHtml(execution?.runId || "")}</span>
+        ${execution?.runId ? `<button type="button" class="btn btn-sm btn-accent" data-workflow-open-trace="${escapeHtml(execution.runId)}">TRACE</button>` : ""}
+      </div>
     </div>
     <div class="workflow-console-body">${rows || '<div class="workflow-results-empty">No nodes on canvas.</div>'}</div>
-    <div class="workflow-console-foot"><span>Execution console</span><span>${escapeHtml(status)}</span></div>
+    <div class="workflow-console-foot"><span>${escapeHtml(summaryText)}</span><span>${escapeHtml(status)}</span></div>
   `;
+  _bindWorkflowResultsDrawerInteractions(drawer);
+}
+
+function _workflowNodeDetailPayload(node) {
+  const payload = {};
+  if (node?.structured_result !== undefined && node?.structured_result !== null) payload.output = node.structured_result;
+  if (node?.error) payload.error = node.error;
+  if (node?.artifacts && Array.isArray(node.artifacts) && node.artifacts.length) payload.artifacts = node.artifacts;
+  const keys = Object.keys(payload);
+  if (!keys.length) return "";
+  try {
+    return JSON.stringify(payload, null, 2);
+  } catch (_) {
+    return String(payload);
+  }
+}
+
+function _bindWorkflowResultsDrawerInteractions(drawer) {
+  drawer.querySelectorAll("[data-workflow-open-trace]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const runId = String(btn.getAttribute("data-workflow-open-trace") || "");
+      if (!runId) return;
+      if (typeof window.openTraceView === "function") window.openTraceView(runId);
+    });
+  });
+  drawer.querySelectorAll("[data-workflow-console-expand]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const key = String(btn.getAttribute("data-workflow-console-expand") || "");
+      if (!key) return;
+      if (_workflowConsoleExpanded.has(key)) _workflowConsoleExpanded.delete(key);
+      else _workflowConsoleExpanded.add(key);
+      renderWorkflowResultsDrawer();
+    });
+  });
+  const handle = drawer.querySelector(".workflow-results-resizer");
+  if (!handle) return;
+  handle.addEventListener("mousedown", _startWorkflowDrawerResize);
+}
+
+function _startWorkflowDrawerResize(event) {
+  event.preventDefault();
+  const drawer = document.getElementById("workflow-results-drawer");
+  if (!drawer) return;
+  const rect = drawer.getBoundingClientRect();
+  _workflowDrawerResizing = {
+    startY: event.clientY,
+    startHeight: rect.height,
+  };
+  document.addEventListener("mousemove", _onWorkflowDrawerResizeMove);
+  document.addEventListener("mouseup", _stopWorkflowDrawerResize);
+}
+
+function _onWorkflowDrawerResizeMove(event) {
+  if (!_workflowDrawerResizing) return;
+  const delta = _workflowDrawerResizing.startY - event.clientY;
+  _workflowDrawerHeight = Math.max(140, Math.min(460, Math.round(_workflowDrawerResizing.startHeight + delta)));
+  const drawer = document.getElementById("workflow-results-drawer");
+  if (drawer) drawer.style.height = `${_workflowDrawerHeight}px`;
+}
+
+function _stopWorkflowDrawerResize() {
+  _workflowDrawerResizing = null;
+  document.removeEventListener("mousemove", _onWorkflowDrawerResizeMove);
+  document.removeEventListener("mouseup", _stopWorkflowDrawerResize);
 }
 
 function setWorkflowEditorState(state) {
