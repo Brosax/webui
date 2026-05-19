@@ -3386,8 +3386,11 @@ async function openSkill(name, el) {
   _editingSkillName = null;
   try {
     const data = await api(`/api/skills/content?name=${encodeURIComponent(name)}`);
-    _currentSkillDetail = { name, content: data.content || '', linked_files: data.linked_files || {} };
-    _renderSkillDetail(name, data.content || '', data.linked_files || {});
+    if (data && data.success === false) throw new Error(data.error || data.message || name);
+    const displayName = (data && data.name) || name;
+    const content = data.raw_content || data.content || '';
+    _currentSkillDetail = { name: displayName, content, linked_files: data.linked_files || {} };
+    _renderSkillDetail(displayName, content, data.linked_files || {});
   } catch(e) { setStatus(t('skill_load_failed') + e.message); }
 }
 

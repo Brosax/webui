@@ -390,13 +390,58 @@ def _linked_files_for_skill(skill_dir: Path | None) -> dict:
     return linked_files
 
 
-def _skill_view_from_file(skill_dir: Path | None, skill_md: Path) -> dict:
+def _normalize_skill_required_env_vars(frontmatter: dict) -> list:
+    raw = frontmatter.get("required_environment_variables", [])
+    if raw is None:
+        return []
+    if isinstance(raw, str):
+        raw = [raw]
+    if not isinstance(raw, list):
+        return []
+    normalized = []
+    for item in raw:
+        if isinstance(item, str):
+            name = item.strip()
+            if name:
+                normalized.append({"name": name})
+        elif isinstance(item, dict):
+            normalized.append(dict(item))
+    return normalized
+
+
+def _skill_relative_path(skill_md: Path, search_root: Path | None = None) -> str:
+    roots = []
+    if search_root is not None:
+        roots.append(Path(search_root))
+    try:
+        if search_root is None and skill_md.parent.name:
+            roots.append(skill_md.parent.parent)
+    except Exception:
+        pass
+    for root in roots:
+        try:
+            return str(skill_md.relative_to(root))
+        except ValueError:
+            continue
+    return str(skill_md)
+
+
+def _skill_view_from_file(
+    skill_dir: Path | None,
+    skill_md: Path,
+    *,
+    search_root: Path | None = None,
+) -> dict:
     from tools.skills_tool import _parse_frontmatter, _parse_tags, skill_matches_platform
 
     content = skill_md.read_text(encoding="utf-8")
     frontmatter, _body = _parse_frontmatter(content)
     if not skill_matches_platform(frontmatter):
-        return {"success": False, "error": "Skill is not available on this platform."}
+        return {
+            "success": False,
+            "error": "Skill is not available on this platform.",
+            "readiness_status": "unsupported",
+        }
 
     metadata = frontmatter.get("metadata")
     hermes_meta = metadata.get("hermes", {}) if isinstance(metadata, dict) else {}
@@ -404,10 +449,11 @@ def _skill_view_from_file(skill_dir: Path | None, skill_md: Path) -> dict:
     related_skills = _parse_tags(
         hermes_meta.get("related_skills") or frontmatter.get("related_skills", "")
     )
-    try:
-        path = str(skill_md.relative_to((skill_dir or skill_md.parent).parent))
-    except ValueError:
-        path = str(skill_md)
+    linked_files = _linked_files_for_skill(skill_dir)
+    required_env_vars = _normalize_skill_required_env_vars(frontmatter)
+    required_credential_files = frontmatter.get("required_credential_files", [])
+    missing_credential_files = [] if isinstance(required_credential_files, list) else []
+    path = _skill_relative_path(skill_md, search_root)
 
     return {
         "success": True,
@@ -416,10 +462,35 @@ def _skill_view_from_file(skill_dir: Path | None, skill_md: Path) -> dict:
         "tags": tags,
         "related_skills": related_skills,
         "content": content,
+        "raw_content": content,
         "path": path,
         "skill_dir": str(skill_dir) if skill_dir else None,
-        "linked_files": _linked_files_for_skill(skill_dir),
+        "linked_files": linked_files,
+        "usage_hint": (
+            "To view linked files, call skill_view(name, file_path) where file_path is e.g. "
+            "'references/api.md' or 'assets/config.yaml'"
+            if linked_files
+            else None
+        ),
+        "required_environment_variables": required_env_vars,
+        "required_commands": [],
+        "missing_required_environment_variables": [],
+        "missing_credential_files": missing_credential_files,
+        "missing_required_commands": [],
+        "setup_needed": False,
+        "setup_skipped": False,
+        "readiness_status": "available",
     }
+
+
+def _skill_search_root_for_path(skill_md: Path, search_dirs: list[Path]) -> Path | None:
+    for search_dir in search_dirs:
+        try:
+            skill_md.resolve().relative_to(search_dir.resolve())
+            return search_dir
+        except (OSError, ValueError):
+            continue
+    return None
 
 
 def _skill_view_from_active_dir(name: str) -> dict:
@@ -446,7 +517,57 @@ def _skill_view_from_active_dir(name: str) -> dict:
             except Exception:
                 pass
         return _skill_not_found_payload(name, skills_dir)
-    return _skill_view_from_file(skill_dir, skill_md)
+    return _skill_view_from_file(
+        skill_dir,
+        skill_md,
+        search_root=_skill_search_root_for_path(skill_md, search_dirs),
+    )
+
+
+def _skill_linked_file_payload(name: str, skill_dir: Path, file_path: str) -> tuple[dict, int]:
+    raw_path = str(file_path or "")
+    candidate = Path(raw_path)
+    if candidate.is_absolute() or ".." in candidate.parts:
+        return {
+            "success": False,
+            "error": "Invalid file path",
+            "hint": "Use a relative path within the skill directory",
+        }, 400
+
+    target = (skill_dir / raw_path).resolve()
+    try:
+        target.relative_to(skill_dir.resolve())
+    except (OSError, ValueError):
+        return {
+            "success": False,
+            "error": "Invalid file path",
+            "hint": "Use a relative path within the skill directory",
+        }, 400
+    if not target.exists() or not target.is_file():
+        return {
+            "success": False,
+            "error": "File not found",
+            "hint": "Use a linked file path returned by the skill detail response",
+        }, 404
+    try:
+        content = target.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        return {
+            "success": True,
+            "name": name,
+            "file": raw_path,
+            "content": f"[Binary file: {target.name}, size: {target.stat().st_size} bytes]",
+            "is_binary": True,
+            "path": raw_path,
+        }, 200
+    return {
+        "success": True,
+        "name": name,
+        "file": raw_path,
+        "content": content,
+        "file_type": target.suffix,
+        "path": raw_path,
+    }, 200
 
 # ── SSE app-level heartbeat (#1623) ────────────────────────────────────────
 #
@@ -4568,17 +4689,10 @@ def handle_get(handler, parsed) -> bool:
             )
             if not skill_dir:
                 return bad(handler, "Skill not found", 404)
-            target = (skill_dir / file_path).resolve()
-            try:
-                target.relative_to(skill_dir.resolve())
-            except ValueError:
-                return bad(handler, "Invalid file path", 400)
-            if not target.exists() or not target.is_file():
-                return bad(handler, "File not found", 404)
-            return j(
-                handler,
-                {"content": target.read_text(encoding="utf-8"), "path": file_path},
-            )
+            payload, status = _skill_linked_file_payload(name, skill_dir, file_path)
+            if status >= 400:
+                return bad(handler, payload.get("error", "Failed to read skill file"), status)
+            return j(handler, payload, status=status)
         data = _skill_view_from_active_dir(name)
         if not isinstance(data.get("linked_files"), dict):
             data["linked_files"] = {}
