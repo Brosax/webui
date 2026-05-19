@@ -6,6 +6,7 @@ Extracted from server.py (Sprint 11) so server.py is a thin shell.
 import html as _html
 import copy
 import hashlib
+import io
 import json
 import logging
 import os
@@ -50,6 +51,9 @@ _CLIENT_DISCONNECT_ERRORS = (
 # Track job IDs currently being executed so the frontend can poll status.
 _RUNNING_CRON_JOBS: dict[str, float] = {}  # job_id → start_timestamp
 _RUNNING_CRON_LOCK = threading.Lock()
+_MANUAL_COMPRESSION_JOBS: dict[str, dict] = {}
+_MANUAL_COMPRESSION_JOBS_LOCK = threading.Lock()
+_MANUAL_COMPRESSION_JOB_TTL_SECONDS = 10 * 60
 _CRON_OUTPUT_CONTENT_LIMIT = 8000
 _CRON_OUTPUT_HEADER_CONTEXT = 200
 _MESSAGING_RAW_SOURCES = {str(s).strip().lower() for s in MESSAGING_SOURCES}
@@ -1351,6 +1355,7 @@ from api.config import (
     get_webui_session_save_mode,
     STREAM_GOAL_RELATED,
     PENDING_GOAL_CONTINUATION,
+    STREAM_LAST_EVENT_ID,
 )
 from api.helpers import (
     require,
@@ -1498,6 +1503,22 @@ def _clear_stale_stream_state(session) -> bool:
         except Exception:
             pass
     return True
+
+
+def _run_journal_status_payload(summary: dict, *, active: bool = False) -> dict:
+    terminal = bool(summary.get("terminal"))
+    terminal_state = summary.get("terminal_state")
+    if not active and not terminal:
+        terminal_state = "stale-from-restart"
+    return {
+        "session_id": summary.get("session_id"),
+        "run_id": summary.get("run_id"),
+        "last_seq": summary.get("last_seq"),
+        "last_event_id": summary.get("last_event_id"),
+        "last_event": summary.get("last_event"),
+        "terminal": terminal,
+        "terminal_state": terminal_state,
+    }
 
 # ── CSRF: validate Origin/Referer on POST ────────────────────────────────────
 import re as _re
@@ -2309,6 +2330,12 @@ from api.streaming import (
     cancel_stream,
     _materialize_pending_user_turn_before_error,
 )
+from api.run_journal import (
+    find_run_summary,
+    read_run_events,
+    stale_interrupted_event,
+)
+from api.turn_journal import append_turn_journal_event
 from api.providers import get_providers, get_provider_quota, set_provider_key, remove_provider_key
 from api.onboarding import (
     apply_onboarding_setup,
@@ -4552,7 +4579,16 @@ def handle_get(handler, parsed) -> bool:
         if scope_err:
             return scope_err
         stream_id = parse_qs(parsed.query).get("stream_id", [""])[0]
-        return j(handler, {"active": stream_id in STREAMS, "stream_id": stream_id})
+        active = stream_id in STREAMS
+        payload = {"active": active, "stream_id": stream_id}
+        if stream_id:
+            try:
+                journal = find_run_summary(stream_id)
+                if journal:
+                    payload["journal"] = _run_journal_status_payload(journal, active=active)
+            except Exception:
+                logger.debug("Failed to read run journal status for stream %s", stream_id, exc_info=True)
+        return j(handler, payload)
 
     if parsed.path == "/api/chat/cancel":
         scope_err = _require_scope(handler, "chat")
@@ -4569,6 +4605,13 @@ def handle_get(handler, parsed) -> bool:
         if scope_err:
             return scope_err
         return _handle_sse_stream(handler, parsed)
+
+    if parsed.path == "/api/session/compress/status":
+        scope_err = _require_scope(handler, "chat")
+        if scope_err:
+            return scope_err
+        query = parse_qs(parsed.query)
+        return _handle_session_compress_status(handler, query.get("session_id", [""])[0])
 
     if parsed.path == "/api/terminal/output":
         return _handle_terminal_output(handler, parsed)
@@ -5944,6 +5987,9 @@ def handle_post(handler, parsed) -> bool:
     if parsed.path == "/api/session/compress":
         return _handle_session_compress(handler, body)
 
+    if parsed.path == "/api/session/compress/start":
+        return _handle_session_compress_start(handler, body)
+
     if parsed.path == "/api/session/conversation-rounds":
         return _handle_conversation_rounds(handler, body)
 
@@ -7236,11 +7282,71 @@ def _handle_list_dir(handler, parsed):
         return bad(handler, _sanitize_error(e), 404)
 
 
+def _sse_with_id(handler, event, data, event_id=None):
+    if event_id:
+        handler.wfile.write(f"id: {event_id}\n".encode("utf-8"))
+    _sse(handler, event, data)
+
+
+def _parse_run_journal_after_seq(qs: dict) -> int | None:
+    raw = qs.get("after_seq", [None])[0]
+    if raw in (None, ""):
+        return None
+    try:
+        return max(0, int(raw))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _replay_run_journal(handler, stream_id: str, after_seq: int | None) -> bool:
+    summary = find_run_summary(stream_id)
+    if not summary:
+        return False
+    journal = read_run_events(
+        str(summary.get("session_id") or ""),
+        stream_id,
+        after_seq=after_seq,
+    )
+    for entry in journal.get("events") or []:
+        _sse_with_id(
+            handler,
+            entry.get("event") or entry.get("type") or "message",
+            entry.get("payload"),
+            entry.get("event_id"),
+        )
+    if not summary.get("terminal"):
+        stale = stale_interrupted_event(
+            str(summary.get("session_id") or ""),
+            stream_id,
+            after_seq=after_seq,
+        )
+        if stale:
+            _sse_with_id(handler, stale["event"], stale["payload"], stale["event_id"])
+    return True
+
+
 def _handle_sse_stream(handler, parsed):
-    stream_id = parse_qs(parsed.query).get("stream_id", [""])[0]
+    qs = parse_qs(parsed.query)
+    stream_id = qs.get("stream_id", [""])[0]
     stream = STREAMS.get(stream_id)
     if stream is None:
-        return j(handler, {"error": "stream not found"}, status=404)
+        try:
+            journal_available = bool(find_run_summary(stream_id)) if stream_id else False
+        except Exception:
+            journal_available = False
+        if not journal_available:
+            return j(handler, {"error": "stream not found"}, status=404)
+        handler.send_response(200)
+        handler.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        handler.send_header("Cache-Control", "no-cache")
+        handler.send_header("X-Accel-Buffering", "no")
+        handler.send_header("Connection", "keep-alive")
+        handler.end_headers()
+        try:
+            _replay_run_journal(handler, stream_id, _parse_run_journal_after_seq(qs))
+        except _CLIENT_DISCONNECT_ERRORS:
+            pass
+        return True
     subscriber = stream.subscribe() if hasattr(stream, "subscribe") else stream
     handler.send_response(200)
     handler.send_header("Content-Type", "text/event-stream; charset=utf-8")
@@ -7256,7 +7362,11 @@ def _handle_sse_stream(handler, parsed):
                 handler.wfile.write(b": heartbeat\n\n")
                 handler.wfile.flush()
                 continue
-            _sse(handler, event, data)
+            event_id = STREAM_LAST_EVENT_ID.get(stream_id)
+            if event_id:
+                _sse_with_id(handler, event, data, event_id)
+            else:
+                _sse(handler, event, data)
             if event in ("stream_end", "error", "cancel"):
                 break
     except _CLIENT_DISCONNECT_ERRORS:
@@ -8822,6 +8932,19 @@ def _start_chat_stream_for_session(
             model_provider=model_provider,
             stream_id=stream_id,
         )
+        try:
+            append_turn_journal_event(
+                s.session_id,
+                {
+                    "event": "submitted",
+                    "stream_id": stream_id,
+                    "message": msg,
+                    "attachments": attachments,
+                    "created_at": float(getattr(s, "pending_started_at", None) or time.time()),
+                },
+            )
+        except Exception:
+            logger.debug("Failed to append submitted turn journal event", exc_info=True)
     diag.stage("set_last_workspace") if diag else None
     set_last_workspace(workspace)
     diag.stage("stream_registration") if diag else None
@@ -9780,6 +9903,171 @@ def _handle_clarify_respond(handler, body):
         return bad(handler, "response is required")
     resolve_clarify(sid, response, resolve_all=False)
     return j(handler, {"ok": True, "response": response})
+
+
+class _ManualCompressionMemoryHandler:
+    def __init__(self):
+        self.wfile = io.BytesIO()
+        self.status = None
+        self.sent_headers = {}
+
+    def send_response(self, status):
+        self.status = status
+
+    def send_header(self, key, value):
+        self.sent_headers[key] = value
+
+    def end_headers(self):
+        pass
+
+    def payload(self):
+        raw = self.wfile.getvalue().decode("utf-8")
+        return json.loads(raw) if raw else {}
+
+
+def _manual_compression_cleanup_locked(now=None):
+    now = time.time() if now is None else now
+    for sid, job in list(_MANUAL_COMPRESSION_JOBS.items()):
+        if job.get("status") == "running":
+            continue
+        updated_at = float(job.get("updated_at") or job.get("started_at") or now)
+        if now - updated_at > _MANUAL_COMPRESSION_JOB_TTL_SECONDS:
+            _MANUAL_COMPRESSION_JOBS.pop(sid, None)
+
+
+def _manual_compression_status_payload(job):
+    status = job.get("status") or "running"
+    payload = {
+        "ok": status not in {"error", "cancelled"},
+        "status": status,
+        "session_id": job.get("session_id"),
+        "focus_topic": job.get("focus_topic"),
+        "started_at": job.get("started_at"),
+        "updated_at": job.get("updated_at"),
+    }
+    if status == "done":
+        result = job.get("result")
+        if isinstance(result, dict):
+            payload.update(result)
+        payload["status"] = "done"
+        payload["ok"] = True
+    elif status == "error":
+        payload["ok"] = False
+        payload["error"] = job.get("error") or "Compression failed"
+        payload["error_status"] = int(job.get("error_status") or 400)
+    elif status == "cancelled":
+        payload["ok"] = False
+        payload["error"] = job.get("error") or "Compression cancelled"
+        payload["error_status"] = int(job.get("error_status") or 409)
+    return payload
+
+
+def _run_manual_compression_job(sid, body):
+    memory_handler = _ManualCompressionMemoryHandler()
+    try:
+        try:
+            session = get_session(sid)
+        except KeyError:
+            session = None
+        if session is not None:
+            from api import profiles as profiles_api
+
+            with profiles_api.profile_env_for_background_worker(session, "manual compression", logger_override=logger):
+                _handle_session_compress(memory_handler, body)
+        else:
+            _handle_session_compress(memory_handler, body)
+        status = int(memory_handler.status or 500)
+        payload = memory_handler.payload()
+        with _MANUAL_COMPRESSION_JOBS_LOCK:
+            job = _MANUAL_COMPRESSION_JOBS.get(sid)
+            if not job:
+                return
+            now = time.time()
+            if status >= 400 or not isinstance(payload, dict) or payload.get("error"):
+                job.update(
+                    {
+                        "status": "error",
+                        "error": str((payload or {}).get("error") or "Compression failed"),
+                        "error_status": status,
+                        "updated_at": now,
+                    }
+                )
+            else:
+                job.update({"status": "done", "result": payload, "updated_at": now})
+    except Exception as exc:
+        logger.warning("Manual compression worker failed for session %s: %s", sid, exc)
+        with _MANUAL_COMPRESSION_JOBS_LOCK:
+            job = _MANUAL_COMPRESSION_JOBS.get(sid)
+            if job:
+                job.update(
+                    {
+                        "status": "error",
+                        "error": f"Compression failed: {_sanitize_error(exc)}",
+                        "error_status": 500,
+                        "updated_at": time.time(),
+                    }
+                )
+
+
+def _handle_session_compress_start(handler, body):
+    try:
+        require(body, "session_id")
+    except ValueError as e:
+        return bad(handler, str(e))
+
+    sid = str(body.get("session_id") or "").strip()
+    if not sid:
+        return bad(handler, "session_id is required")
+    try:
+        s = get_session(sid)
+    except KeyError:
+        return bad(handler, "Session not found", 404)
+    if getattr(s, "active_stream_id", None):
+        return bad(handler, "Session is still streaming; wait for the current turn to finish.", 409)
+
+    focus_topic = str(body.get("focus_topic") or body.get("topic") or "").strip()[:500] or None
+    job_body = {"session_id": sid}
+    if focus_topic:
+        job_body["focus_topic"] = focus_topic
+
+    now = time.time()
+    with _MANUAL_COMPRESSION_JOBS_LOCK:
+        _manual_compression_cleanup_locked(now)
+        existing = _MANUAL_COMPRESSION_JOBS.get(sid)
+        if existing and _manual_compression_status_payload(existing).get("status") == "running":
+            return j(handler, _manual_compression_status_payload(existing))
+        _MANUAL_COMPRESSION_JOBS.pop(sid, None)
+        job = {
+            "session_id": sid,
+            "focus_topic": focus_topic,
+            "status": "running",
+            "started_at": now,
+            "updated_at": now,
+        }
+        _MANUAL_COMPRESSION_JOBS[sid] = job
+
+    worker = threading.Thread(
+        target=_run_manual_compression_job,
+        args=(sid, job_body),
+        name=f"manual-compress-{sid[:8]}",
+        daemon=True,
+    )
+    worker.start()
+
+    with _MANUAL_COMPRESSION_JOBS_LOCK:
+        return j(handler, _manual_compression_status_payload(_MANUAL_COMPRESSION_JOBS.get(sid, job)))
+
+
+def _handle_session_compress_status(handler, sid):
+    sid = str(sid or "").strip()
+    if not sid:
+        return bad(handler, "session_id is required")
+    with _MANUAL_COMPRESSION_JOBS_LOCK:
+        _manual_compression_cleanup_locked()
+        job = _MANUAL_COMPRESSION_JOBS.get(sid)
+        if not job:
+            return j(handler, {"ok": True, "status": "idle", "session_id": sid})
+        return j(handler, _manual_compression_status_payload(job))
 
 
 def _handle_session_compress(handler, body):
